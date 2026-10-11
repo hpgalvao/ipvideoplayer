@@ -1,0 +1,43 @@
+# Dependencias
+node_modules/
+frontend/node_modules/
+
+# Build do frontend
+frontend/dist/
+dist/
+build/
+
+# Variaveis de ambiente (NUNCA commitar credenciais)
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Banco de dados local (grande, gerado pela sincronizacao)
+data/*.sqlite
+data/*.sqlite-journal
+data/*.db
+data/*.db-journal
+
+# Uploads/avatares privados (conteudo do usuario)
+media/avatar_privado/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Configuracoes locais de ferramentas/editor
+.kilo/
+.vscode/
+.idea/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Dados de volume Docker
+iptv-data/

@@ -1,0 +1,27 @@
+{
+  "name": "iptv",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Aplicativo IPTV pessoal com proxy Xtream Codes e interface estilo streaming.",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "node server/index.js",
+    "client": "npm run dev --prefix frontend",
+    "build": "npm run build --prefix frontend",
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.3",
+    "node-fetch": "^3.3.2",
+    "sql.js": "^1.14.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

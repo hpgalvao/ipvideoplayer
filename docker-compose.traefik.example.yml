@@ -1,0 +1,23 @@
+services:
+  app-iptv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: always
+    env_file:
+      - ./.env.production
+    environment:
+      - NODE_ENV=production
+      - PORT=8787
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./iptv-data:/app/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.app-iptv.rule=Host(`iptv.${DOMAIN_NAME}`)
+      - traefik.http.routers.app-iptv.entrypoints=web,websecure
+      - traefik.http.routers.app-iptv.tls=true
+      - traefik.http.routers.app-iptv.tls.certresolver=mytlschallenge
+      - traefik.http.services.app-iptv.loadbalancer.server.port=8787
