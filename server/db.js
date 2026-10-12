@@ -7,7 +7,8 @@ import initSqlJs from 'sql.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
-const dataDir = path.resolve(projectRoot, 'data');
+const defaultDataDir = path.resolve(projectRoot, 'data');
+const dataDir = path.resolve(process.env.IPTV_DB_PATH || defaultDataDir);
 const dbFile = path.resolve(dataDir, 'catalog.sqlite');
 const wasmDir = path.resolve(projectRoot, 'node_modules', 'sql.js', 'dist');
 
@@ -223,7 +224,8 @@ function initializeSchema(db) {
       added TEXT,
       plot TEXT,
       normalized_plot TEXT,
-      tmdb_id TEXT
+      tmdb_id TEXT,
+      catalog_id TEXT
     );
   `);
 
@@ -239,6 +241,7 @@ function initializeSchema(db) {
   ensureColumn(db, 'items', 'normalized_director', 'TEXT');
   ensureColumn(db, 'items', 'age_rating', 'INTEGER');
   ensureColumn(db, 'items', 'normalized_plot', 'TEXT');
+  ensureColumn(db, 'items', 'catalog_id', 'TEXT');
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_items_content_type ON items(content_type);
@@ -247,11 +250,13 @@ function initializeSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_items_sort_name ON items(sort_name);
     CREATE INDEX IF NOT EXISTS idx_items_series_key ON items(series_key);
     CREATE INDEX IF NOT EXISTS idx_items_series_title ON items(series_title);
+    CREATE INDEX IF NOT EXISTS idx_items_catalog_id ON items(catalog_id);
   `);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS catalogs (
       id TEXT PRIMARY KEY,
+      user_id TEXT,
       name TEXT NOT NULL,
       url TEXT NOT NULL,
       base_url TEXT,
@@ -270,8 +275,6 @@ function initializeSchema(db) {
       last_sync_at TEXT
     );
 
-    CREATE INDEX IF NOT EXISTS idx_catalogs_created_at ON catalogs(created_at);
-
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       tipo TEXT NOT NULL DEFAULT 'usuario',
@@ -285,10 +288,52 @@ function initializeSchema(db) {
       plano TEXT,
       dt_assinatura TEXT,
       dt_validade TEXT,
+      profile_limit INTEGER,
+      catalog_limit INTEGER,
       ativo INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+  `);
+
+  // Add missing columns to existing tables BEFORE creating indexes that depend on them
+  ensureColumn(db, 'catalogs', 'base_url', 'TEXT');
+  ensureColumn(db, 'catalogs', 'username', 'TEXT');
+  ensureColumn(db, 'catalogs', 'password', 'TEXT');
+  ensureColumn(db, 'catalogs', 'output', 'TEXT');
+  ensureColumn(db, 'catalogs', 'user_id', 'TEXT');
+  ensureColumn(db, 'catalogs', 'is_public', 'INTEGER NOT NULL DEFAULT 0');
+
+  ensureColumn(db, 'users', 'foto', 'TEXT');
+  ensureColumn(db, 'users', 'email', 'TEXT');
+  ensureColumn(db, 'users', 'contato', 'TEXT');
+  ensureColumn(db, 'users', 'profile_limit', 'INTEGER');
+  ensureColumn(db, 'users', 'catalog_limit', 'INTEGER');
+
+  ensureColumn(db, 'profiles', 'avatar', 'TEXT');
+  ensureColumn(db, 'profiles', 'color', 'TEXT');
+  ensureColumn(db, 'profiles', 'max_age_rating', 'INTEGER DEFAULT 999');
+  ensureColumn(db, 'profiles', 'catalog_id', 'TEXT');
+
+  ensureColumn(db, 'items', 'series_title', 'TEXT');
+  ensureColumn(db, 'items', 'normalized_series_title', 'TEXT');
+  ensureColumn(db, 'items', 'series_key', 'TEXT');
+  ensureColumn(db, 'items', 'season_number', 'INTEGER');
+  ensureColumn(db, 'items', 'episode_number', 'INTEGER');
+  ensureColumn(db, 'items', 'episode_title', 'TEXT');
+  ensureColumn(db, 'items', 'cast_text', 'TEXT');
+  ensureColumn(db, 'items', 'normalized_cast', 'TEXT');
+  ensureColumn(db, 'items', 'director', 'TEXT');
+  ensureColumn(db, 'items', 'normalized_director', 'TEXT');
+  ensureColumn(db, 'items', 'age_rating', 'INTEGER');
+  ensureColumn(db, 'items', 'normalized_plot', 'TEXT');
+  ensureColumn(db, 'items', 'catalog_id', 'TEXT');
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_catalogs_created_at ON catalogs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_catalogs_user_id ON catalogs(user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 
     CREATE TABLE IF NOT EXISTS profiles (
       id TEXT PRIMARY KEY,
@@ -297,6 +342,7 @@ function initializeSchema(db) {
       avatar TEXT,
       color TEXT,
       max_age_rating INTEGER NOT NULL DEFAULT 999,
+      catalog_id TEXT,
       pin TEXT,
       sort_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
@@ -306,18 +352,15 @@ function initializeSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_profiles_user_id ON profiles(user_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_user_name ON profiles(user_id, name);
-  `);
 
-  ensureColumn(db, 'users', 'foto', 'TEXT');
-  ensureColumn(db, 'users', 'email', 'TEXT');
-  ensureColumn(db, 'users', 'contato', 'TEXT');
-  ensureColumn(db, 'profiles', 'avatar', 'TEXT');
-  ensureColumn(db, 'profiles', 'color', 'TEXT');
-  ensureColumn(db, 'profiles', 'max_age_rating', 'INTEGER DEFAULT 999');
-  ensureColumn(db, 'catalogs', 'base_url', 'TEXT');
-  ensureColumn(db, 'catalogs', 'username', 'TEXT');
-  ensureColumn(db, 'catalogs', 'password', 'TEXT');
-  ensureColumn(db, 'catalogs', 'output', 'TEXT');
+    CREATE INDEX IF NOT EXISTS idx_items_content_type ON items(content_type);
+    CREATE INDEX IF NOT EXISTS idx_items_category ON items(category);
+    CREATE INDEX IF NOT EXISTS idx_items_year ON items(year);
+    CREATE INDEX IF NOT EXISTS idx_items_sort_name ON items(sort_name);
+    CREATE INDEX IF NOT EXISTS idx_items_series_key ON items(series_key);
+    CREATE INDEX IF NOT EXISTS idx_items_series_title ON items(series_title);
+    CREATE INDEX IF NOT EXISTS idx_items_catalog_id ON items(catalog_id);
+  `);
 }
 
 export function hashPassword(password, salt) {

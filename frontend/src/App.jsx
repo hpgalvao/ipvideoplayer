@@ -772,7 +772,7 @@ function ContinueWatchingCard({ item, progressEntry, watched, onPlay, onRemove }
           <button type="button" className="ghost-btn" onClick={() => onRemove(item.id)}>
             Excluir
           </button>
-        </div>
+</div>
       </div>
     </article>
   );
@@ -975,15 +975,20 @@ function ProfileManagerModal({
   );
 }
 
-function CatalogManagerModal({ onClose }) {
+function CatalogManagerModal({ onClose, activeProfileId, profiles, userCatalogLimit }) {
   const [catalogs, setCatalogs] = useState([]);
+  const [publicCatalogs, setPublicCatalogs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [publicLoading, setPublicLoading] = useState(false);
   const [error, setError] = useState('');
+  const [addModalOpen, setAddModalOpen] = useState(false);
+  const [addModalMode, setAddModalMode] = useState('form');
   const [form, setForm] = useState({ name: '', baseUrl: '', username: '', password: '', output: 'm3u8', url: '' });
   const [provider, setProvider] = useState({ baseUrl: '', username: '', hasPassword: false });
   const [formError, setFormError] = useState('');
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState('');
+  const [useCustomUrl, setUseCustomUrl] = useState(false);
 
   const loadCatalogs = useCallback(async () => {
     setLoading(true);
@@ -1008,6 +1013,18 @@ function CatalogManagerModal({ onClose }) {
       setError(requestError.message);
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const loadPublicCatalogs = useCallback(async () => {
+    setPublicLoading(true);
+    try {
+      const payload = await requestJson('/api/catalogs/public');
+      setPublicCatalogs(Array.isArray(payload.catalogs) ? payload.catalogs : []);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setPublicLoading(false);
     }
   }, []);
 
@@ -1050,10 +1067,28 @@ function CatalogManagerModal({ onClose }) {
       });
       setCatalogs((current) => [payload.catalog, ...current]);
       setForm((current) => ({ ...current, name: '', url: '' }));
+      setAddModalOpen(false);
     } catch (requestError) {
       setFormError(requestError.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function useCatalog(catalogId) {
+    setBusyId(catalogId);
+    setError('');
+    try {
+      const payload = await requestJson(`/api/catalogs/${encodeURIComponent(catalogId)}/use`, {
+        method: 'POST',
+        body: JSON.stringify({ profileId: activeProfileId }),
+      });
+      setCatalogs((current) => current.map((entry) => (entry.id === payload.catalog.id ? payload.catalog : entry)));
+      onClose();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusyId('');
     }
   }
 
@@ -1085,15 +1120,511 @@ function CatalogManagerModal({ onClose }) {
     }
   }
 
-  const useCustomUrl = Boolean(form.url.trim());
+  async function togglePublic(catalogId, currentIsPublic) {
+    setBusyId(catalogId);
+    setError('');
+    try {
+      const payload = await requestJson(`/api/catalogs/${encodeURIComponent(catalogId)}/toggle-public`, {
+        method: 'POST',
+      });
+      setCatalogs((current) => current.map((entry) => (entry.id === payload.catalog.id ? payload.catalog : entry)));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusyId('');
+    }
+  }
+
+  function openAddModal() {
+    setForm({ name: '', baseUrl: '', username: '', password: '', output: 'm3u8', url: '' });
+    setFormError('');
+    setUseCustomUrl(false);
+    setAddModalMode('form');
+    setAddModalOpen(true);
+  }
+
+  function closeAddModal() {
+    setAddModalOpen(false);
+  }
+
+  const canAddCatalog = catalogs.length < (userCatalogLimit || 5);
+
+  return (
+    <>
+      <div className="modal-overlay" onClick={onClose}>
+        <div className="modal-panel is-catalog-manager" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true">
+          <header className="modal-head">
+            <div>
+              <h2>Meus catalogos</h2>
+              <p>Baixe e guarde varias listas M3U. Se uma forma de download falhar, o sistema tenta alternativas automaticamente.</p>
+            </div>
+            <button type="button" className="ghost-btn" onClick={onClose}>
+              Fechar
+            </button>
+          </header>
+
+          {error && <div className="inline-alert">{error}</div>}
+
+          <div className="catalog-list">
+            {loading ? (
+              <div className="empty-state compact">
+                <strong>Carregando catalogos...</strong>
+              </div>
+            ) : catalogs.length === 0 ? (
+              <div className="empty-state compact">
+                <strong>Nenhuma lista ainda</strong>
+                <span>Clique em "Adicionar catalogo" para comecar.</span>
+              </div>
+            ) : (
+              catalogs.map((catalog) => (
+                <div key={catalog.id} className={`catalog-card is-${catalog.status}`}>
+                  <div className="catalog-card-header">
+                    <div className="catalog-card-title">
+                      <strong>{catalog.name}</strong>
+                      <span className={`catalog-status is-${catalog.status}`}>{catalogStatusLabel(catalog.status)}</span>
+                      {catalog.isPublic && <span className="catalog-badge is-public">Publico</span>}
+                    </div>
+                  </div>
+
+                  <div className="catalog-card-info">
+                    {catalog.url && (
+                      <small className="catalog-card-url">{catalog.url}</small>
+                    )}
+
+                    {catalog.status === 'ok' && (
+                      <div className="catalog-card-stats">
+                        <span>{statLabel(catalog.liveCount, 'canal', 'canais')}</span>
+                        <span>{statLabel(catalog.movieCount, 'filme', 'filmes')}</span>
+                        <span>{statLabel(catalog.seriesCount, 'serie', 'series')}</span>
+                      </div>
+                    )}
+
+                    {catalog.status === 'error' && (
+                      <span className="catalog-card-error">
+                        {catalog.error || 'Nao foi possivel baixar esta lista.'}
+                      </span>
+                    )}
+
+                    {catalog.status === 'pending' && (
+                      <span className="catalog-card-hint">Baixando lista...</span>
+                    )}
+
+                    <small className="catalog-card-date">
+                      {catalog.lastSyncAt ? `Baixada em ${formatDate(catalog.lastSyncAt)}` : `Adicionada em ${formatDate(catalog.createdAt)}`}
+                    </small>
+                  </div>
+
+                  <div className="catalog-card-actions">
+                    {catalog.status === 'ok' && (
+                      <button
+                        type="button"
+                        className="primary-btn"
+                        onClick={() => useCatalog(catalog.id)}
+                        disabled={busyId === catalog.id}
+                      >
+                        {busyId === catalog.id ? 'Carregando...' : 'Usar catalogo'}
+                      </button>
+                    )}
+                    {catalog.status !== 'pending' && (
+                      <button
+                        type="button"
+                        className={catalog.status === 'error' ? 'primary-btn' : 'ghost-btn'}
+                        onClick={() => retryCatalog(catalog.id)}
+                        disabled={busyId === catalog.id}
+                      >
+                        {busyId === catalog.id
+                          ? 'Baixando...'
+                          : catalog.status === 'error'
+                            ? 'Tentar novamente'
+                            : 'Atualizar'}
+                      </button>
+                    )}
+                    {catalog.status === 'ok' && (
+                      <button
+                        type="button"
+                        className={`ghost-btn ${catalog.isPublic ? 'is-danger' : ''}`}
+                        onClick={() => togglePublic(catalog.id, catalog.isPublic)}
+                        disabled={busyId === catalog.id}
+                      >
+                        {busyId === catalog.id ? '...' : (catalog.isPublic ? 'Tornar privado' : 'Tornar publico')}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="ghost-btn is-danger"
+                      onClick={() => removeCatalog(catalog.id)}
+                      disabled={busyId === catalog.id}
+                    >
+                      Remover
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          {canAddCatalog && (
+            <div className="catalog-add-button-wrap">
+              <button type="button" className="primary-btn is-wide" onClick={openAddModal}>
+                Adicionar catalogo
+              </button>
+            </div>
+          )}
+
+          {!canAddCatalog && catalogs.length > 0 && (
+            <div className="catalog-limit-reached">
+              <strong>Limite de catalogos atingido</strong>
+              <p>Voce atingiu o limite de {userCatalogLimit || 5} catalogos. Remova um catalogo para adicionar outro.</p>
+            </div>
+          )}
+
+          <div className="catalog-public-section">
+            <div className="catalog-public-header">
+              <h3>Catalogos publicos</h3>
+              <button
+                type="button"
+                className="ghost-btn"
+                onClick={loadPublicCatalogs}
+                disabled={publicLoading}
+              >
+                {publicLoading ? 'Carregando...' : 'Buscar catalogos publicos'}
+              </button>
+            </div>
+            {publicCatalogs.length > 0 && (
+              <div className="catalog-public-list">
+                {publicCatalogs.map((catalog) => (
+                  <div key={catalog.id} className={`catalog-card is-${catalog.status} is-public-catalog`}>
+                    <div className="catalog-card-header">
+                      <div className="catalog-card-title">
+                        <strong>{catalog.name}</strong>
+                        <span className={`catalog-status is-${catalog.status}`}>{catalogStatusLabel(catalog.status)}</span>
+                        <span className="catalog-badge is-public">Publico</span>
+                      </div>
+                    </div>
+
+                    <div className="catalog-card-info">
+                      {catalog.url && (
+                        <small className="catalog-card-url">{catalog.url}</small>
+                      )}
+
+                      {catalog.status === 'ok' && (
+                        <div className="catalog-card-stats">
+                          <span>{statLabel(catalog.liveCount, 'canal', 'canais')}</span>
+                          <span>{statLabel(catalog.movieCount, 'filme', 'filmes')}</span>
+                          <span>{statLabel(catalog.seriesCount, 'serie', 'series')}</span>
+                        </div>
+                      )}
+
+                      <small className="catalog-card-date">
+                        {catalog.lastSyncAt ? `Baixada em ${formatDate(catalog.lastSyncAt)}` : `Adicionada em ${formatDate(catalog.createdAt)}`}
+                      </small>
+                      {catalog.ownerName && (
+                        <small className="catalog-card-owner">Dono: {catalog.ownerName}</small>
+                      )}
+                    </div>
+
+                    <div className="catalog-card-actions">
+                      {catalog.status === 'ok' && (
+                        <button
+                          type="button"
+                          className="primary-btn"
+                          onClick={() => useCatalog(catalog.id)}
+                          disabled={busyId === catalog.id}
+                        >
+                          {busyId === catalog.id ? 'Carregando...' : 'Usar catalogo'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {addModalOpen && (
+        <div className="modal-overlay" onClick={closeAddModal}>
+          <div className="modal-panel is-catalog-add" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true">
+            <header className="modal-head">
+              <div>
+                <h2>Adicionar catalogo</h2>
+                <p>Escolha como deseja adicionar a lista.</p>
+              </div>
+              <button type="button" className="ghost-btn" onClick={closeAddModal}>
+                Fechar
+              </button>
+            </header>
+
+            <div className="catalog-add-mode-toggle">
+              <button
+                type="button"
+                className={addModalMode === 'form' ? 'is-active' : ''}
+                onClick={() => setAddModalMode('form')}
+              >
+                Formulario
+              </button>
+              <button
+                type="button"
+                className={addModalMode === 'link' ? 'is-active' : ''}
+                onClick={() => setAddModalMode('link')}
+              >
+                Link direto
+              </button>
+            </div>
+
+            {formError && <div className="inline-alert">{formError}</div>}
+
+            {addModalMode === 'form' && (
+              <form className="catalog-add-form" onSubmit={submitCatalog}>
+                <div className="catalog-form-grid">
+                  <label className="auth-field">
+                    <span>Nome da lista (opcional)</span>
+                    <input
+                      type="text"
+                      value={form.name}
+                      onChange={(event) => updateForm({ name: event.target.value })}
+                      placeholder="Ex.: Provedor principal"
+                      disabled={saving}
+                    />
+                  </label>
+                  <label className="auth-field">
+                    <span>Base URL do provedor</span>
+                    <input
+                      type="text"
+                      value={form.baseUrl}
+                      onChange={(event) => updateForm({ baseUrl: event.target.value })}
+                      placeholder="http://seu-servidor-iptv"
+                      disabled={saving || useCustomUrl}
+                    />
+                  </label>
+                  <label className="auth-field">
+                    <span>Usuario</span>
+                    <input
+                      type="text"
+                      value={form.username}
+                      onChange={(event) => updateForm({ username: event.target.value })}
+                      placeholder="usuario do provedor"
+                      disabled={saving || useCustomUrl}
+                    />
+                  </label>
+                  <label className="auth-field">
+                    <span>Senha</span>
+                    <input
+                      type="password"
+                      value={form.password}
+                      onChange={(event) => updateForm({ password: event.target.value })}
+                      placeholder={provider.hasPassword ? 'Usar a senha do sistema' : 'senha do provedor'}
+                      disabled={saving || useCustomUrl}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="auth-field">
+                    <span>Saida da lista</span>
+                    <select
+                      value={form.output}
+                      onChange={(event) => updateForm({ output: event.target.value })}
+                      disabled={saving || useCustomUrl}
+                    >
+                      <option value="m3u8">m3u8 (HLS)</option>
+                      <option value="ts">ts (MPEG-TS)</option>
+                    </select>
+                  </label>
+                </div>
+
+                {provider.hasPassword && !form.password.trim() && !useCustomUrl && (
+                  <small className="catalog-form-hint">Deixe a senha vazia para usar a senha configurada no sistema.</small>
+                )}
+
+                <div className="modal-actions">
+                  <button type="submit" className="primary-btn" disabled={saving}>
+                    {saving ? 'Baixando lista...' : 'Baixar lista'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {addModalMode === 'link' && (
+              <form className="catalog-add-form" onSubmit={submitCatalog}>
+                <div className="catalog-form-grid">
+                  <label className="auth-field">
+                    <span>Nome da lista (opcional)</span>
+                    <input
+                      type="text"
+                      value={form.name}
+                      onChange={(event) => updateForm({ name: event.target.value })}
+                      placeholder="Ex.: Provedor principal"
+                      disabled={saving}
+                    />
+                  </label>
+                  <label className="auth-field is-full-width">
+                    <span>Link Xtream / M3U / M3U8</span>
+                    <input
+                      type="text"
+                      value={form.url}
+                      onChange={(event) => updateForm({ url: event.target.value })}
+                      placeholder="xc://usuario:senha@host/streaming=ts ou https://exemplo.com/lista.m3u8"
+                      disabled={saving}
+                    />
+                  </label>
+                </div>
+
+                <small className="catalog-form-hint">
+                  Aceita links xc://, get.php, xmltv.php ou uma URL M3U/M3U8 direta.
+                </small>
+
+                <div className="modal-actions">
+                  <button type="submit" className="primary-btn" disabled={saving}>
+                    {saving ? 'Baixando lista...' : 'Baixar lista'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function UserManagerModal({ onClose }) {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [form, setForm] = useState({ nome: '', email: '', contato: '', username: '', password: '', tipo: 'usuario', plano: 'free', profileLimit: 5, catalogLimit: 5 });
+  const [formError, setFormError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [busyId, setBusyId] = useState('');
+  const [userFormModalOpen, setUserFormModalOpen] = useState(false);
+
+  const loadUsers = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const payload = await requestJson('/api/users?scope=all');
+      setUsers(Array.isArray(payload.users) ? payload.users : []);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadUsers();
+  }, [loadUsers]);
+
+  function updateForm(patch) {
+    setForm((current) => ({ ...current, ...patch }));
+  }
+
+  async function submitUser(event) {
+    event.preventDefault();
+    const username = form.username.trim();
+    const password = form.password.trim();
+    const nome = form.nome.trim();
+
+    if (!username || !password || !nome) {
+      setFormError('Usuario, senha e nome sao obrigatorios.');
+      return;
+    }
+
+    setFormError('');
+    setSaving(true);
+    try {
+      const url = editingId ? `/api/users/${encodeURIComponent(editingId)}` : '/api/users';
+      const method = editingId ? 'PUT' : 'POST';
+      const body = editingId
+        ? { nome: form.nome.trim(), email: form.email.trim(), contato: form.contato.trim(), tipo: form.tipo, plano: form.plano, profileLimit: Number(form.profileLimit) || 5, catalogLimit: Number(form.catalogLimit) || 5 }
+        : { nome, username, password, email: form.email.trim(), contato: form.contato.trim(), tipo: form.tipo, plano: form.plano, profileLimit: Number(form.profileLimit) || 5, catalogLimit: Number(form.catalogLimit) || 5 };
+      const payload = await requestJson(url, {
+        method,
+        body: JSON.stringify(body),
+      });
+      setUsers((current) => editingId
+        ? current.map((u) => (u.id === editingId ? payload.user : u))
+        : [payload.user, ...current]);
+      setForm({ nome: '', email: '', contato: '', username: '', password: '', tipo: 'usuario', plano: 'free', profileLimit: 5, catalogLimit: 5 });
+      setEditingId(null);
+      setUserFormModalOpen(false);
+    } catch (requestError) {
+      setFormError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleUserStatus(userId, currentActive) {
+    setBusyId(userId);
+    setError('');
+    try {
+      const payload = await requestJson(`/api/users/${encodeURIComponent(userId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ ativo: !currentActive }),
+      });
+      setUsers((current) => current.map((u) => (u.id === userId ? payload.user : u)));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusyId('');
+    }
+  }
+
+  async function removeUser(userId) {
+    if (!confirm('Tem certeza que deseja excluir este usuario? Todos os perfis e catalogos vinculados serao removidos.')) {
+      return;
+    }
+    setBusyId(userId);
+    setError('');
+    try {
+      await requestJson(`/api/users/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+      setUsers((current) => current.filter((u) => u.id !== userId));
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusyId('');
+    }
+  }
+
+  function openEdit(user) {
+    setEditingId(user.id);
+    setForm({
+      nome: user.nome || '',
+      email: user.email || '',
+      contato: user.contato || '',
+      username: user.username || '',
+      password: '',
+      tipo: user.tipo || 'usuario',
+      plano: user.plano || 'free',
+      profileLimit: user.profileLimit ?? 5,
+      catalogLimit: user.catalogLimit ?? 5,
+    });
+    setFormError('');
+    setUserFormModalOpen(true);
+  }
+
+  function openCreate() {
+    setEditingId(null);
+    setForm({ nome: '', email: '', contato: '', username: '', password: '', tipo: 'usuario', plano: 'free', profileLimit: 5, catalogLimit: 5 });
+    setFormError('');
+    setUserFormModalOpen(true);
+  }
+
+  function closeUserFormModal() {
+    setUserFormModalOpen(false);
+    setEditingId(null);
+    setForm({ nome: '', email: '', contato: '', username: '', password: '', tipo: 'usuario', plano: 'free', profileLimit: 5, catalogLimit: 5 });
+    setFormError('');
+  }
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-panel is-catalog-manager" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true">
+      <div className="modal-panel is-user-manager" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true">
         <header className="modal-head">
           <div>
-            <h2>Meus catalogos</h2>
-            <p>Baixe e guarde varias listas M3U. Se uma forma de download falhar, o sistema tenta alternativas automaticamente.</p>
+            <h2>Gerenciar clientes</h2>
+            <p>Crie, edite e controle o acesso dos usuarios do sistema.</p>
           </div>
           <button type="button" className="ghost-btn" onClick={onClose}>
             Fechar
@@ -1102,163 +1633,66 @@ function CatalogManagerModal({ onClose }) {
 
         {error && <div className="inline-alert">{error}</div>}
 
-        <form className="catalog-add-form" onSubmit={submitCatalog}>
-          <div className="catalog-form-grid">
-            <label className="auth-field">
-              <span>Nome da lista (opcional)</span>
-              <input
-                type="text"
-                value={form.name}
-                onChange={(event) => updateForm({ name: event.target.value })}
-                placeholder="Ex.: Provedor principal"
-                disabled={saving}
-              />
-            </label>
-            <label className="auth-field">
-              <span>Base URL do provedor</span>
-              <input
-                type="text"
-                value={form.baseUrl}
-                onChange={(event) => updateForm({ baseUrl: event.target.value })}
-                placeholder="http://seu-servidor-iptv"
-                disabled={saving || useCustomUrl}
-              />
-            </label>
-            <label className="auth-field">
-              <span>Usuario</span>
-              <input
-                type="text"
-                value={form.username}
-                onChange={(event) => updateForm({ username: event.target.value })}
-                placeholder="usuario do provedor"
-                disabled={saving || useCustomUrl}
-              />
-            </label>
-            <label className="auth-field">
-              <span>Senha</span>
-              <input
-                type="password"
-                value={form.password}
-                onChange={(event) => updateForm({ password: event.target.value })}
-                placeholder={provider.hasPassword ? 'Usar a senha do sistema' : 'senha do provedor'}
-                disabled={saving || useCustomUrl}
-                autoComplete="off"
-              />
-            </label>
-            <label className="auth-field">
-              <span>Saida da lista</span>
-              <select
-                value={form.output}
-                onChange={(event) => updateForm({ output: event.target.value })}
-                disabled={saving || useCustomUrl}
-              >
-                <option value="m3u8">m3u8 (HLS)</option>
-                <option value="ts">ts (MPEG-TS)</option>
-              </select>
-            </label>
-            <label className="auth-field">
-              <span>Link Xtream / M3U (opcional)</span>
-              <input
-                type="text"
-                value={form.url}
-                onChange={(event) => updateForm({ url: event.target.value })}
-                placeholder="xc://usuario:senha@host/streaming=ts"
-                disabled={saving}
-              />
-            </label>
-          </div>
+        <div className="user-list-header">
+          <h3>Usuarios</h3>
+          <button type="button" className="primary-btn" onClick={openCreate} disabled={loading}>
+            Criar usuario
+          </button>
+        </div>
 
-          {provider.hasPassword && !form.password.trim() && !useCustomUrl && (
-            <small className="catalog-form-hint">Deixe a senha vazia para usar a senha configurada no sistema.</small>
-          )}
-
-          {useCustomUrl && (
-            <small className="catalog-form-hint">
-              Aceita links xc://, get.php, xmltv.php ou uma URL M3U/M3U8 direta. Os campos acima sao ignorados.
-            </small>
-          )}
-
-          {formError && <div className="inline-alert">{formError}</div>}
-
-          <div className="modal-actions">
-            <button type="submit" className="primary-btn" disabled={saving}>
-              {saving ? 'Baixando lista...' : 'Baixar lista'}
-            </button>
-          </div>
-        </form>
-
-        <div className="catalog-list">
+        <div className="user-list">
           {loading ? (
             <div className="empty-state compact">
-              <strong>Carregando catalogos...</strong>
+              <strong>Carregando usuarios...</strong>
             </div>
-          ) : catalogs.length === 0 ? (
+          ) : users.length === 0 ? (
             <div className="empty-state compact">
-              <strong>Nenhuma lista ainda</strong>
-              <span>Use as credenciais do provedor acima para baixar a primeira lista.</span>
+              <strong>Nenhum usuario ainda</strong>
+              <span>Clique em "Criar usuario" para comecar.</span>
             </div>
           ) : (
-            catalogs.map((catalog) => (
-              <div key={catalog.id} className={`catalog-item is-${catalog.status}`}>
-                <div className="catalog-item-copy">
-                  <div className="catalog-item-title">
-                    <strong>{catalog.name}</strong>
-                    <span className={`catalog-status is-${catalog.status}`}>{catalogStatusLabel(catalog.status)}</span>
+            users.map((user) => (
+              <div key={user.id} className={`user-card ${!user.ativo ? 'is-inactive' : ''}`}>
+                <div className="user-card-info">
+                  <div className="user-card-main">
+                    <strong>{user.nome}</strong>
+                    <span className="user-card-username">@{user.username}</span>
                   </div>
-                  {catalog.baseUrl && (
-                    <small className="catalog-item-provider">
-                      {catalog.baseUrl}
-                      {catalog.username ? ` - ${catalog.username}` : ''}
-                      {` - ${catalog.output || 'm3u8'}`}
-                    </small>
-                  )}
-                  <small className="catalog-item-url">{catalog.url}</small>
-
-                  {catalog.status === 'ok' && (
-                    <div className="catalog-item-stats">
-                      <span>{statLabel(catalog.liveCount, 'canal', 'canais')}</span>
-                      <span>{statLabel(catalog.movieCount, 'filme', 'filmes')}</span>
-                      <span>{statLabel(catalog.seriesCount, 'serie', 'series')}</span>
-                    </div>
-                  )}
-
-                  {catalog.status === 'error' && (
-                    <span className="catalog-item-error">
-                      {catalog.error || 'Nao foi possivel baixar esta lista.'}
-                    </span>
-                  )}
-
-                  {catalog.status === 'pending' && (
-                    <span className="catalog-item-hint">Baixando lista...</span>
-                  )}
-
-                  <small className="catalog-item-date">
-                    {catalog.lastSyncAt ? `Baixada em ${formatDate(catalog.lastSyncAt)}` : `Adicionada em ${formatDate(catalog.createdAt)}`}
-                  </small>
+                  <div className="user-card-meta">
+                    {user.email && <span>{user.email}</span>}
+                    {user.contato && <span>{user.contato}</span>}
+                    <span className={`user-badge is-${user.tipo}`}>{user.tipo === 'admin' ? 'Admin' : 'Usuario'}</span>
+                    <span className="user-badge is-plano">{user.plano || 'free'}</span>
+                    <span>Perfis: {user.profileLimit ?? 5}</span>
+                    <span>Catalogos: {user.catalogLimit ?? 5}</span>
+                    <small>{user.ativo ? 'Ativo' : 'Inativo'}</small>
+                  </div>
                 </div>
 
-                <div className="catalog-item-actions">
-                  {catalog.status !== 'pending' && (
-                    <button
-                      type="button"
-                      className={catalog.status === 'error' ? 'primary-btn' : 'ghost-btn'}
-                      onClick={() => retryCatalog(catalog.id)}
-                      disabled={busyId === catalog.id}
-                    >
-                      {busyId === catalog.id
-                        ? 'Baixando...'
-                        : catalog.status === 'error'
-                          ? 'Tentar novamente'
-                          : 'Atualizar'}
-                    </button>
-                  )}
+                <div className="user-card-actions">
+                  <button
+                    type="button"
+                    className={user.ativo ? 'ghost-btn is-danger' : 'primary-btn'}
+                    onClick={() => toggleUserStatus(user.id, user.ativo)}
+                    disabled={busyId === user.id}
+                  >
+                    {busyId === user.id ? '...' : (user.ativo ? 'Desativar' : 'Ativar')}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={() => openEdit(user)}
+                    disabled={busyId === user.id}
+                  >
+                    Editar
+                  </button>
                   <button
                     type="button"
                     className="ghost-btn is-danger"
-                    onClick={() => removeCatalog(catalog.id)}
-                    disabled={busyId === catalog.id}
+                    onClick={() => removeUser(user.id)}
+                    disabled={busyId === user.id}
                   >
-                    Remover
+                    Excluir
                   </button>
                 </div>
               </div>
@@ -1270,7 +1704,7 @@ function CatalogManagerModal({ onClose }) {
   );
 }
 
-function SeriesDetailsModal({ seriesKey, onClose, onPlay, playbackProgress, watchedMap, profileAgeLimit, onCastOpen }) {
+function SeriesDetailsModal({ seriesKey, onClose, onPlay, playbackProgress, watchedMap, profileAgeLimit, onCastOpen, catalogId }) {
   const [details, setDetails] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -1285,7 +1719,8 @@ function SeriesDetailsModal({ seriesKey, onClose, onPlay, playbackProgress, watc
 
       try {
         const ageParam = profileAgeLimit == null ? '' : `?maxAgeRating=${encodeURIComponent(profileAgeLimit)}`;
-        const payload = await requestJson(`/api/series/${encodeURIComponent(seriesKey)}${ageParam}`);
+        const catalogParam = catalogId ? `&catalogId=${encodeURIComponent(catalogId)}` : '';
+        const payload = await requestJson(`/api/series/${encodeURIComponent(seriesKey)}${ageParam}${catalogParam}`);
         if (cancelled) {
           return;
         }
@@ -1522,6 +1957,200 @@ function CastModal({ loading, error, data, onClose }) {
   );
 }
 
+function MediaDetailsModal({ item, onClose, onPlay, onCastOpen, onChangeItem, catalogId, profileAgeLimit }) {
+  const [recommendations, setRecommendations] = useState([]);
+  const [recLoading, setRecLoading] = useState(true);
+  const [scrollLeft, setScrollLeft] = useState(0);
+  const carouselRef = useRef(null);
+
+  const handleCarouselScroll = useCallback((e) => {
+    setScrollLeft(e.currentTarget.scrollLeft);
+  }, []);
+
+  const canScrollRight = carouselRef.current
+    ? carouselRef.current.scrollLeft + carouselRef.current.clientWidth < carouselRef.current.scrollWidth - 1
+    : false;
+
+  const handleSuggestionClick = (suggestionItem) => {
+    if (onChangeItem) {
+      onChangeItem(suggestionItem);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadRecommendations() {
+      if (!item?.id) return;
+      setRecLoading(true);
+      try {
+        const payload = await requestJson('/api/catalog/query', {
+          method: 'POST',
+          body: JSON.stringify({
+            section: item.contentType === 'live' ? 'live' : item.contentType === 'movie' ? 'movie' : 'series',
+            category: item.category || 'Todas',
+            genre: item.genre || 'Todos',
+            year: item.year || 'Todos',
+            page: 1,
+            pageSize: 8,
+            catalogId,
+            maxAgeRating: profileAgeLimit,
+          }),
+        });
+        if (!cancelled) {
+          const filtered = (payload.items || []).filter((i) => i.id !== item.id).slice(0, 6);
+          setRecommendations(filtered);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn('Failed to load recommendations:', err);
+          setRecommendations([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setRecLoading(false);
+        }
+      }
+    }
+
+    loadRecommendations();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [item?.id, item?.contentType, item?.category, item?.genre, item?.year, catalogId, profileAgeLimit]);
+
+  const handlePlay = () => {
+    onPlay(item);
+    onClose();
+  };
+
+  const handleTrailer = () => {
+    const query = encodeURIComponent(`${item.name} ${item.year || ''} trailer`);
+    window.open(`https://www.youtube.com/results?search_query=${query}`, '_blank');
+  };
+
+  const isLive = item.contentType === 'live';
+  const isMovie = item.contentType === 'movie';
+  const isSeries = item.contentType === 'series' || item.itemType === 'series_group';
+
+  return (
+    <div className="player-overlay" role="dialog" aria-modal="true">
+      <div className="media-details-modal">
+        <header className="media-details-header">
+          <div className="media-details-title-block">
+            <h2>{item.name}</h2>
+            <div className="media-details-meta">
+              <span>{isLive ? 'Ao vivo' : isMovie ? 'Filme' : 'Serie'}</span>
+              {item.year && <span>{item.year}</span>}
+              {item.genre && <span>{item.genre}</span>}
+              {item.category && item.category !== 'Sem categoria' && <span>{item.category}</span>}
+            </div>
+            {item.plot && <p className="media-details-plot">{item.plot}</p>}
+          </div>
+          <button type="button" className="ghost-btn" onClick={onClose}>
+            Fechar
+          </button>
+        </header>
+
+        <div className="media-details-body">
+          <div className="media-details-main">
+            {item.poster ? (
+              <img src={item.poster} alt={item.name} className="media-details-poster" />
+            ) : (
+              <div className="media-details-poster media-details-poster-fallback">{item.name.slice(0, 2).toUpperCase()}</div>
+            )}
+
+            <div className="media-details-actions">
+              <button type="button" className="primary-btn is-large" onClick={handlePlay}>
+                <span>▶</span> Assistir
+              </button>
+              {!isLive && item.trailer && (
+                <button type="button" className="ghost-btn is-large" onClick={handleTrailer}>
+                  <span>🎬</span> Trailer
+                </button>
+              )}
+              {!isLive && !item.trailer && (
+                <button type="button" className="ghost-btn is-large" onClick={handleTrailer} disabled>
+                  <span>🎬</span> Trailer (indisponivel)
+                </button>
+              )}
+            </div>
+          </div>
+
+          {isLive && item.epg && (
+            <div className="media-details-epg">
+              <h3>Programacao</h3>
+              <div className="epg-list">
+                {item.epg.map((program) => (
+                  <div key={program.start} className="epg-item">
+                    <span className="epg-time">{program.start} - {program.end}</span>
+                    <span className="epg-title">{program.title}</span>
+                    {program.description && <span className="epg-desc">{program.description}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(recommendations.length > 0 || recLoading) && (
+            <section className="media-details-recommendations">
+              <h3>Sugeridos</h3>
+              {recLoading ? (
+                <div className="rec-skeleton">
+                  {[...Array(6)].map((_, i) => (
+                    <div key={i} className="rec-skeleton-card">
+                      <div className="rec-skeleton-img" />
+                      <div className="rec-skeleton-text" />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="rec-carousel-wrapper">
+                  <button
+                    type="button"
+                    className="rec-carousel-btn"
+                    onClick={() => carouselRef.current?.scrollBy({ left: -300, behavior: 'smooth' })}
+                    aria-label="Sugeridos anteriores"
+                    disabled={scrollLeft === 0}
+                  >
+                    ‹
+                  </button>
+                  <div className="rec-carousel" ref={carouselRef} onScroll={handleCarouselScroll}>
+                    {recommendations.map((rec) => (
+                      <ItemCard
+                        key={rec.id}
+                        item={rec}
+                        favorite={false}
+                        watchLater={false}
+                        recommended={false}
+                        watched={false}
+                        onFavorite={() => {}}
+                        onWatchLater={() => {}}
+                        onRecommend={() => {}}
+                        onPlay={() => handleSuggestionClick(rec)}
+                      />
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="rec-carousel-btn"
+                    onClick={() => carouselRef.current?.scrollBy({ left: 300, behavior: 'smooth' })}
+                    aria-label="Proximos sugeridos"
+                    disabled={!canScrollRight}
+                  >
+                    ›
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PlayerModal({
   item,
   onClose,
@@ -1537,6 +2166,7 @@ function PlayerModal({
   onWatched,
   onPlayNextEpisode,
   profileAgeLimit,
+  catalogId,
   playerPreferences,
   onUpdatePlayerPreferences,
 }) {
@@ -1712,7 +2342,8 @@ function PlayerModal({
 
       try {
         const ageParam = profileAgeLimit == null ? '' : `?maxAgeRating=${encodeURIComponent(profileAgeLimit)}`;
-        const payload = await requestJson(`/api/series/${encodeURIComponent(item.seriesKey)}${ageParam}`);
+        const catalogParam = catalogId ? `&catalogId=${encodeURIComponent(catalogId)}` : '';
+        const payload = await requestJson(`/api/series/${encodeURIComponent(item.seriesKey)}${ageParam}${catalogParam}`);
         if (!cancelled) {
           setSeriesDetails(payload);
           setNextEpisode(getNextEpisodeFromDetails(payload, item));
@@ -1732,7 +2363,7 @@ function PlayerModal({
     return () => {
       cancelled = true;
     };
-  }, [item, profileAgeLimit]);
+  }, [item, profileAgeLimit, catalogId]);
 
   const clearIdleTimers = useCallback(() => {
     if (idleWarningTimeoutRef.current) {
@@ -2977,6 +3608,7 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [loginLoading, setLoginLoading] = useState(false);
+  const [suspendedInfo, setSuspendedInfo] = useState(null);
   const [favorites, setFavorites] = useState([]);
   const [watchLater, setWatchLater] = useState([]);
   const [recommendations, setRecommendations] = useState([]);
@@ -2991,17 +3623,37 @@ export default function App() {
   const [watchedMap, setWatchedMap] = useState({});
   const [status, setStatus] = useState({
     hasData: false,
+    hasSource: true,
     counts: { live: 0, movie: 0, series: 0 },
     updatedAt: '',
   });
+  const [detailsRecommendations, setDetailsRecommendations] = useState([]);
+  const [detailsRecLoading, setDetailsRecLoading] = useState(false);
+  const [seriesDetails, setSeriesDetails] = useState(null);
+  const [seriesDetailsLoading, setSeriesDetailsLoading] = useState(false);
+  const [seriesDetailsError, setSeriesDetailsError] = useState('');
+  const [selectedSeasonDetail, setSelectedSeasonDetail] = useState('');
+  const carouselRef = useRef(null);
+  const [scrollLeft, setScrollLeft] = useState(0);
+
+  const handleCarouselScroll = useCallback((e) => {
+    setScrollLeft(e.currentTarget.scrollLeft);
+  }, []);
+
+  const canScrollRight = carouselRef.current
+    ? carouselRef.current.scrollLeft + carouselRef.current.clientWidth < carouselRef.current.scrollWidth - 1
+    : false;
   const [items, setItems] = useState([]);
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [activeSection, setActiveSection] = useState('home');
+  const [previousSection, setPreviousSection] = useState('home');
   const [activeCategory, setActiveCategory] = useState('Todas');
   const [activeYear, setActiveYear] = useState('Todos');
   const [activeGenre, setActiveGenre] = useState('Todos');
+  const [categorySidebarOpen, setCategorySidebarOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
+  const [detailsItem, setDetailsItem] = useState(null);
   const [castModalData, setCastModalData] = useState(null);
   const [castModalLoading, setCastModalLoading] = useState(false);
   const [castModalError, setCastModalError] = useState('');
@@ -3029,6 +3681,11 @@ export default function App() {
   const [selectedSeriesKey, setSelectedSeriesKey] = useState('');
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [catalogManagerOpen, setCatalogManagerOpen] = useState(false);
+  const [userManagerOpen, setUserManagerOpen] = useState(false);
+  const [sourceModalOpen, setSourceModalOpen] = useState(false);
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [sourceError, setSourceError] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
   const [profileStateReady, setProfileStateReady] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -3153,6 +3810,7 @@ export default function App() {
       setAuthProfiles([]);
       setActiveProfileId('');
       setAuthError('');
+      setSuspendedInfo(null);
       setLoginForm({ username: '', password: '' });
     }
     function handleForceLogout() {
@@ -3204,6 +3862,98 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!detailsItem?.id) {
+      setDetailsRecommendations([]);
+      setDetailsRecLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setDetailsRecLoading(true);
+
+    async function loadDetailsRecommendations() {
+      try {
+        const item = detailsItem;
+        const payload = await requestJson('/api/catalog/query', {
+          method: 'POST',
+          body: JSON.stringify({
+            section: item.contentType === 'live' ? 'live' : item.contentType === 'movie' ? 'movie' : 'series',
+            category: item.category || 'Todas',
+            genre: item.genre || 'Todos',
+            year: item.year || 'Todos',
+            page: 1,
+            pageSize: 8,
+            catalogId: activeProfile?.catalogId,
+            maxAgeRating: activeProfile?.maxAgeRating ?? null,
+          }),
+        });
+        if (!cancelled) {
+          const filtered = (payload.items || []).filter((i) => i.id !== item.id).slice(0, 6);
+          setDetailsRecommendations(filtered);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn('Failed to load details recommendations:', err);
+          setDetailsRecommendations([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setDetailsRecLoading(false);
+        }
+      }
+    }
+
+    loadDetailsRecommendations();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detailsItem?.id, detailsItem?.contentType, detailsItem?.category, detailsItem?.genre, detailsItem?.year, activeProfile?.catalogId, activeProfile?.maxAgeRating]);
+
+  useEffect(() => {
+    const isSeriesGroup = detailsItem?.itemType === 'series_group';
+    const seriesKey = detailsItem?.seriesKey;
+    if (!isSeriesGroup || !seriesKey) {
+      setSeriesDetails(null);
+      setSeriesDetailsError('');
+      setSelectedSeasonDetail('');
+      return;
+    }
+
+    let cancelled = false;
+    setSeriesDetailsLoading(true);
+    setSeriesDetailsError('');
+    setSelectedSeasonDetail('');
+
+    async function loadSeriesDetails() {
+      try {
+        const ageParam = activeProfile?.maxAgeRating == null ? '' : `?maxAgeRating=${encodeURIComponent(activeProfile.maxAgeRating)}`;
+        const catalogParam = activeProfile?.catalogId ? `${ageParam ? '&' : '?'}catalogId=${encodeURIComponent(activeProfile.catalogId)}` : '';
+        const payload = await requestJson(`/api/series/${encodeURIComponent(seriesKey)}${ageParam}${catalogParam}`);
+        if (cancelled) return;
+        setSeriesDetails(payload);
+        const firstSeason = payload?.seasons?.[0];
+        setSelectedSeasonDetail(firstSeason ? String(firstSeason.seasonNumber) : '');
+      } catch (err) {
+        if (!cancelled) {
+          setSeriesDetailsError(err?.message || 'Falha ao carregar episodios.');
+          setSeriesDetails(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setSeriesDetailsLoading(false);
+        }
+      }
+    }
+
+    loadSeriesDetails();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detailsItem?.itemType, detailsItem?.seriesKey, activeProfile?.catalogId, activeProfile?.maxAgeRating]);
+
+  useEffect(() => {
     if (!activeProfileStorageReady.current) {
       return;
     }
@@ -3233,6 +3983,14 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify({ username, password }),
       });
+      if (payload?.suspended) {
+        setSuspendedInfo({
+          reason: payload.reason || 'Sua conta esta suspensa. Entre em contato com o administrador.',
+          user: payload.user || null,
+        });
+        setLoginForm({ username: '', password: '' });
+        return;
+      }
       if (payload?.ok && payload.user && Array.isArray(payload.profiles)) {
         setAuthUser(payload.user);
         setAuthProfiles(payload.profiles);
@@ -3254,6 +4012,7 @@ export default function App() {
     setAuthProfiles([]);
     setActiveProfileId('');
     setAuthError('');
+    setSuspendedInfo(null);
     setProfileModalOpen(false);
   }
 
@@ -3533,7 +4292,7 @@ export default function App() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ ids: list }),
+        body: JSON.stringify({ ids: list, catalogId: activeProfile?.catalogId }),
       });
       return {
         valid: Array.isArray(payload.valid) ? payload.valid : [],
@@ -3551,9 +4310,11 @@ export default function App() {
   }, [activeSection]);
 
   async function fetchStatus() {
-    const payload = await requestJson('/api/catalog/status');
+    const catalogParam = activeProfile?.catalogId ? `?catalogId=${encodeURIComponent(activeProfile.catalogId)}` : '';
+    const payload = await requestJson(`/api/catalog/status${catalogParam}`);
     setStatus({
       hasData: payload.hasData,
+      hasSource: payload.hasSource !== false,
       counts: payload.counts,
       updatedAt: payload.updatedAt,
     });
@@ -3573,11 +4334,13 @@ export default function App() {
         body: JSON.stringify({
           ...settings,
           force,
+          catalogId: activeProfile?.catalogId,
         }),
       });
 
       setStatus({
         hasData: payload.hasData,
+        hasSource: true,
         counts: payload.counts,
         updatedAt: payload.updatedAt,
       });
@@ -3587,6 +4350,54 @@ export default function App() {
       throw requestError;
     } finally {
       setSyncLoading(false);
+    }
+  }
+
+  function openSourceModal() {
+    setSourceError('');
+    setSourceModalOpen(true);
+  }
+
+  function closeSourceModal() {
+    if (sourceLoading) {
+      return;
+    }
+    setSourceModalOpen(false);
+    setSourceError('');
+  }
+
+  async function submitSourceUrl(event) {
+    if (event) event.preventDefault();
+    const url = sourceUrl.trim();
+    if (!url) {
+      setSourceError('Informe a URL da lista M3U.');
+      return;
+    }
+
+    setSourceLoading(true);
+    setSourceError('');
+    try {
+      const payload = await requestJson('/api/catalog/source', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url, catalogId: activeProfile?.catalogId }),
+      });
+
+      setStatus({
+        hasData: payload.hasData,
+        hasSource: true,
+        counts: payload.counts,
+        updatedAt: payload.updatedAt,
+      });
+      setSourceUrl('');
+      setSourceModalOpen(false);
+      setError('');
+    } catch (requestError) {
+      setSourceError(requestError.message || 'Nao foi possivel baixar a lista informada.');
+    } finally {
+      setSourceLoading(false);
     }
   }
 
@@ -3613,6 +4424,7 @@ export default function App() {
           year: activeYear,
           genre: activeGenre,
           maxAgeRating: activeProfile?.maxAgeRating ?? null,
+          catalogId: activeProfile?.catalogId,
           ids: activeSectionIds,
         }),
       });
@@ -3638,15 +4450,30 @@ export default function App() {
         const currentStatus = await fetchStatus();
 
         if (!currentStatus.hasData && isAdmin) {
-          const synced = await syncCatalog(false);
-          if (cancelled) {
-            return;
+          if (currentStatus.hasSource === false) {
+            // Sem provedor configurado (sem usuario/senha): pede a URL direta da lista.
+            if (!cancelled) {
+              setSourceModalOpen(true);
+            }
+          } else {
+            try {
+              const synced = await syncCatalog(false);
+              if (cancelled) {
+                return;
+              }
+              setStatus({
+                hasData: synced.hasData,
+                hasSource: true,
+                counts: synced.counts,
+                updatedAt: synced.updatedAt,
+              });
+            } catch {
+              // Se a sincronizacao falhar, oferece a URL direta como alternativa.
+              if (!cancelled) {
+                setSourceModalOpen(true);
+              }
+            }
           }
-          setStatus({
-            hasData: synced.hasData,
-            counts: synced.counts,
-            updatedAt: synced.updatedAt,
-          });
         }
       } catch (requestError) {
         if (!cancelled) {
@@ -3741,6 +4568,18 @@ export default function App() {
     }
   }
 
+  const openDetails = useCallback((item) => {
+    if (!isItemAllowedForProfile(item, activeProfile)) {
+      setError(`O perfil ${activeProfile.name} nao pode abrir este conteudo pela faixa etaria.`);
+      return;
+    }
+
+    setRecentItem(item);
+    setPreviousSection(activeSection);
+    setActiveSection('details');
+    setDetailsItem(item);
+  }, [activeProfile, activeSection]);
+
   const openPlayer = useCallback((item) => {
     if (!isItemAllowedForProfile(item, activeProfile)) {
       setError(`O perfil ${activeProfile.name} nao pode abrir este conteudo pela faixa etaria.`);
@@ -3750,6 +4589,30 @@ export default function App() {
     setRecentItem(item);
     setSelectedItem(item);
   }, [activeProfile]);
+
+  const playFromDetails = useCallback((item) => {
+    if (!isItemAllowedForProfile(item, activeProfile)) {
+      setError(`O perfil ${activeProfile.name} nao pode abrir este conteudo pela faixa etaria.`);
+      return;
+    }
+    setRecentItem(item);
+    setSelectedItem(item);
+    setDetailsItem(null);
+  }, [activeProfile]);
+
+  const closeDetailsModal = useCallback(() => {
+    setDetailsItem(null);
+  }, []);
+
+  const handleSuggestionClick = useCallback((suggestionItem) => {
+    if (!suggestionItem) return;
+    setDetailsItem(suggestionItem);
+    if (carouselRef.current) {
+      carouselRef.current.scrollLeft = 0;
+      setScrollLeft(0);
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
 
   const openCastModal = useCallback(async (baseQuery, contentType) => {
     const safeQuery = String(baseQuery || '').trim();
@@ -3827,12 +4690,7 @@ export default function App() {
   }, [clearPlaybackProgress]);
 
   function handleCatalogAction(item) {
-    if (item.itemType === 'series_group') {
-      setSelectedSeriesKey(item.seriesKey);
-      return;
-    }
-
-    openPlayer(item);
+    openDetails(item);
   }
 
   function handleEpisodePlay(episode) {
@@ -4243,6 +5101,30 @@ export default function App() {
           </form>
         </div>
       </div>
+    );
+  }
+
+  function renderSuspendedScreen() {
+    return (
+      <section className="auth-screen auth-profiles">
+        <div className="auth-bg" />
+        <div className="profile-picker-panel">
+          <header className="profile-picker-head">
+            <div className="picker-head-user">
+              <div>
+                <span className="picker-hello">Acesso bloqueado</span>
+                <h1>{suspendedInfo?.user?.nome || 'Conta suspensa'}</h1>
+                <p>{suspendedInfo?.reason || 'Sua conta esta suspensa. Entre em contato com o administrador.'}</p>
+              </div>
+            </div>
+          </header>
+          <div className="picker-head-actions">
+            <button type="button" className="ghost-btn" onClick={() => setSuspendedInfo(null)}>
+              Voltar para o login
+            </button>
+          </div>
+        </div>
+      </section>
     );
   }
 
@@ -4862,6 +5744,12 @@ export default function App() {
               <strong>IPTV Particular</strong>
               <span>Perfil: {activeProfile.name}</span>
             </div>
+            {activeProfile.catalogId && (
+              <div className="brand-catalog">
+                <span className="catalog-indicator">📺</span>
+                <span>Catalogo: {activeProfile.catalogName || 'Carregando...'}</span>
+              </div>
+            )}
             <div className="clock-divider" />
             <div className="clock-copy">
               <strong>{new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</strong>
@@ -5184,14 +6072,15 @@ export default function App() {
           </header>
 
           <div className="filter-row">
-            <select value={activeCategory} onChange={(event) => setActiveCategory(event.target.value)}>
-              <option value="Todas">Todas as categorias</option>
-              {filterOptions.categories.map((category) => (
-                <option key={category} value={category}>
-                  {category}
-                </option>
-              ))}
-            </select>
+            <button
+              type="button"
+              className="category-toggle-btn"
+              onClick={() => setCategorySidebarOpen(true)}
+            >
+              <span>📁</span>
+              <span>{activeCategory === 'Todas' ? 'Todas as categorias' : activeCategory}</span>
+              <span className="category-toggle-caret">▾</span>
+            </button>
 
             <select value={activeYear} onChange={(event) => setActiveYear(event.target.value)}>
               <option value="Todos">Todos os anos</option>
@@ -5211,6 +6100,38 @@ export default function App() {
               ))}
             </select>
           </div>
+
+          {categorySidebarOpen && (
+            <div className="category-sidebar-overlay" onClick={() => setCategorySidebarOpen(false)}>
+              <div className="category-sidebar" onClick={(e) => e.stopPropagation()}>
+                <header className="category-sidebar-header">
+                  <h3>Categorias</h3>
+                  <button type="button" className="ghost-btn" onClick={() => setCategorySidebarOpen(false)}>
+                    Fechar
+                  </button>
+                </header>
+                <div className="category-sidebar-list">
+                  <button
+                    type="button"
+                    className={`category-sidebar-item ${activeCategory === 'Todas' ? 'is-active' : ''}`}
+                    onClick={() => { setActiveCategory('Todas'); setCategorySidebarOpen(false); }}
+                  >
+                    Todas as categorias
+                  </button>
+                  {filterOptions.categories.map((category) => (
+                    <button
+                      key={category}
+                      type="button"
+                      className={`category-sidebar-item ${activeCategory === category ? 'is-active' : ''}`}
+                      onClick={() => { setActiveCategory(category); setCategorySidebarOpen(false); }}
+                    >
+                      {category}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
           {error && <div className="inline-alert">{error}</div>}
 
@@ -5306,6 +6227,22 @@ export default function App() {
                 <small>{formatProfileAgeLabel(activeProfile.maxAgeRating)}</small>
               </div>
             </div>
+            {activeProfile?.catalogId && (
+              <div className="active-catalog-info">
+                <strong>Catalogo ativo:</strong> {activeProfile.catalogId}
+                <button type="button" className="ghost-btn" onClick={() => setCatalogManagerOpen(true)} style={{ marginLeft: '8px', padding: '4px 10px', fontSize: '12px' }}>
+                  Trocar catalogo
+                </button>
+              </div>
+            )}
+            {!activeProfile?.catalogId && (
+              <div className="active-catalog-info" style={{ background: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.2)', color: '#fecaca' }}>
+                <strong>Nenhum catalogo selecionado</strong>
+                <button type="button" className="ghost-btn" onClick={() => setCatalogManagerOpen(true)} style={{ marginLeft: '8px', padding: '4px 10px', fontSize: '12px' }}>
+                  Selecionar catalogo
+                </button>
+              </div>
+            )}
           </div>
 
           {error && <div className="inline-alert">{error}</div>}
@@ -5313,19 +6250,14 @@ export default function App() {
           <div className="settings-actions">
             {isAdmin && (
               <>
-                <button type="button" className="primary-btn" onClick={openSyncConfirm} disabled={syncLoading}>
-                  {syncLoading ? 'Sincronizando...' : 'Ressincronizar catalogo'}
+                <button type="button" className="ghost-btn" onClick={() => setUserManagerOpen(true)}>
+                  Gerenciar clientes
+                </button>
+                <button type="button" className="ghost-btn" onClick={() => setCatalogManagerOpen(true)}>
+                  Meus catalogos
                 </button>
               </>
             )}
-            {/*isAdmin && (
-              <>
-                <button type="button" className="ghost-btn" onClick={() => setCatalogManagerOpen(true)}>
-                  Meus catalogos!
-                </button>
-                
-              </>
-            )*/}            
             <button type="button" className="ghost-btn" onClick={() => setProfileModalOpen(true)}>
               Gerenciar perfis
             </button>
@@ -5335,6 +6267,47 @@ export default function App() {
           </div>
         </div>
       </section>
+    );
+  }
+
+  function renderSourceModal() {
+    if (!sourceModalOpen) {
+      return null;
+    }
+
+    return (
+      <div className="modal-overlay" onClick={closeSourceModal}>
+        <div className="modal-panel is-catalog-manager" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true">
+          <header className="modal-head">
+            <div>
+              <h2>Informe a lista (M3U)</h2>
+              <p>Nenhum provedor com usuario/senha esta configurado. Cole a URL direta da lista M3U para baixar e usar como catalogo do sistema.</p>
+            </div>
+            <button type="button" className="ghost-btn" onClick={closeSourceModal} disabled={sourceLoading}>
+              Fechar
+            </button>
+          </header>
+
+          <form className="catalog-add-form" onSubmit={submitSourceUrl}>
+            <label className="auth-field">
+              <span>URL da lista M3U</span>
+              <input
+                type="text"
+                value={sourceUrl}
+                onChange={(event) => setSourceUrl(event.target.value)}
+                placeholder="https://algum-endereco-publico/playlist.m3u8"
+                disabled={sourceLoading}
+              />
+            </label>
+            {sourceError && <div className="inline-alert">{sourceError}</div>}
+            <div className="modal-actions">
+              <button type="submit" className="primary-btn" disabled={sourceLoading || !sourceUrl.trim()}>
+                {sourceLoading ? 'Baixando lista...' : 'Baixar e usar como catalogo'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
     );
   }
 
@@ -5442,6 +6415,293 @@ export default function App() {
     );
   }
 
+  function renderMediaDetails() {
+    const item = detailsItem;
+    if (!item) return <></>;
+
+    const isLive = item.contentType === 'live';
+    const isMovie = item.contentType === 'movie';
+    const isSeriesGroup = item.itemType === 'series_group';
+    const isSeries = item.contentType === 'series' || isSeriesGroup;
+    const isFavorite = favorites.includes(item.id);
+    const isWatchLater = watchLater.includes(item.id);
+
+    const seriesInfo = isSeriesGroup ? (seriesDetails?.series || null) : null;
+    const seasons = isSeriesGroup ? (seriesDetails?.seasons || []) : [];
+    const activeSeason = seasons.find((season) => String(season.seasonNumber) === selectedSeasonDetail) || seasons[0] || null;
+
+    const posterSrc = item.poster || seriesInfo?.poster || '';
+    const displayYear = item.year || seriesInfo?.year || null;
+    const displayGenre = item.genre || seriesInfo?.genre || '';
+    const displayCategory = (item.category && item.category !== 'Sem categoria')
+      ? item.category
+      : (seriesInfo?.category || '');
+    const displayPlot = item.plot || seriesInfo?.plot || '';
+    const firstEpisode = activeSeason?.episodes?.[0] || seasons[0]?.episodes?.[0] || null;
+
+    const handleWatch = () => {
+      if (isSeriesGroup) {
+        if (firstEpisode) {
+          setDetailsItem(null);
+          setActiveSection(previousSection);
+          openPlayer(firstEpisode);
+        }
+        return;
+      }
+      playFromDetails(item);
+    };
+
+    const watchDisabled = isSeriesGroup && !firstEpisode && !seriesDetailsLoading;
+    const episodeLabelOf = (episode) => formatEpisodeLabel(episode) || episode.name;
+
+    return (
+      <section className="media-details-page">
+        <div
+          className="media-details-bg"
+          style={{ backgroundImage: item.poster ? `url(${item.poster})` : 'none' }}
+          aria-hidden="true"
+        />
+        <div className="media-details-overlay">
+          <header className="media-details-header">
+            <button
+              type="button"
+              className="back-btn"
+              onClick={() => {
+                setDetailsItem(null);
+                setActiveSection(previousSection);
+              }}
+              aria-label="Voltar"
+            >
+              <span>←</span> Voltar
+            </button>
+          </header>
+
+          <div className="media-details-body">
+            <div className="media-details-content">
+              <div className="media-details-poster-section">
+                {posterSrc ? (
+                  <img src={posterSrc} alt={item.name} className="media-details-poster" />
+                ) : (
+                  <div className="media-details-poster media-details-poster-fallback">{item.name.slice(0, 2).toUpperCase()}</div>
+                )}
+              </div>
+
+              <div className="media-details-info-section">
+                <div className="media-details-meta-top">
+                  <span className="type-badge">{isLive ? 'Ao vivo' : isMovie ? 'Filme' : 'Serie'}</span>
+                  {displayYear && <span className="year-badge">{displayYear}</span>}
+                  {displayGenre && <span className="genre-badge">{displayGenre}</span>}
+                  {displayCategory && <span className="category-badge">{displayCategory}</span>}
+                </div>
+                <h1 className="media-details-title">{item.name}</h1>
+                {displayPlot && <p className="media-details-plot">{displayPlot}</p>}
+                {isSeriesGroup && seriesInfo && (
+                  <p className="media-details-submeta">
+                    {[seriesInfo.seasonCount ? `${seriesInfo.seasonCount} temporadas` : '', seriesInfo.episodeCount ? `${seriesInfo.episodeCount} episodios` : '']
+                      .filter(Boolean)
+                      .join(' • ')}
+                  </p>
+                )}
+
+                <div className="media-details-status">
+                  <button
+                    type="button"
+                    className={`status-btn ${isFavorite ? 'active' : ''}`}
+                    onClick={toggleFavorite}
+                    aria-label={isFavorite ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
+                  >
+                    <span>{isFavorite ? '♥' : '♡'}</span> Favorito
+                  </button>
+                  <button
+                    type="button"
+                    className={`status-btn ${isWatchLater ? 'active' : ''}`}
+                    onClick={toggleWatchLater}
+                    aria-label={isWatchLater ? 'Remover da lista depois' : 'Adicionar para assistir depois'}
+                  >
+                    <span>{isWatchLater ? '✓' : '⌚'}</span> Assistir depois
+                  </button>
+                  {recommendations.some((r) => r.item?.id === item.id) && (
+                    <button
+                      type="button"
+                      className="status-btn active"
+                      onClick={() => toggleRecommendation(item)}
+                      aria-label="Remover das recomendacoes"
+                    >
+                      <span>✦</span> Recomendado
+                    </button>
+                  )}
+                  {Boolean(watchedMap[item.id]) && (
+                    <span className="status-btn watched">
+                      <span>✓</span> Assistido
+                    </span>
+                  )}
+                </div>
+
+                <div className="media-details-actions">
+                  <button
+                    type="button"
+                    className="primary-btn is-large"
+                    onClick={handleWatch}
+                    disabled={watchDisabled}
+                  >
+                    <span>▶</span> {isSeriesGroup ? 'Assistir primeiro episodio' : isLive ? 'Assistir agora' : 'Assistir'}
+                  </button>
+                  {!isLive && (
+                    <button type="button" className="ghost-btn is-large" onClick={() => {
+                      const query = encodeURIComponent(`${item.name} ${displayYear || ''} trailer`);
+                      window.open(`https://www.youtube.com/results?search_query=${query}`, '_blank');
+                    }}>
+                      <span>🎬</span> Trailer
+                    </button>
+                  )}
+                  {openCastModal && item.name && (
+                    <button type="button" className="ghost-btn is-large" onClick={() => openCastModal(item.name, isMovie ? 'movie' : 'series')}>
+                      <span>★</span> Elenco
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {isSeriesGroup && (
+              <section className="media-details-episodes">
+                <div className="episodes-header">
+                  <h3>Episodios</h3>
+                  {seasons.length > 0 && (
+                    <label className="season-select">
+                      <span>Temporada</span>
+                      <select value={selectedSeasonDetail} onChange={(event) => setSelectedSeasonDetail(event.target.value)}>
+                        {seasons.map((season) => (
+                          <option key={season.seasonNumber} value={season.seasonNumber}>
+                            {season.label || `Temporada ${season.seasonNumber}`}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                </div>
+
+                {seriesDetailsLoading && <div className="player-state">Carregando episodios...</div>}
+                {seriesDetailsError && !seriesDetailsLoading && <div className="player-state is-error">{seriesDetailsError}</div>}
+
+                {!seriesDetailsLoading && !seriesDetailsError && activeSeason && (
+                  <div className="episode-list">
+                    {activeSeason.episodes.map((episode) => {
+                      const episodeLabel = episodeLabelOf(episode);
+                      const watched = Boolean(watchedMap[episode.id]);
+                      return (
+                        <button
+                          key={episode.id}
+                          type="button"
+                          className="episode-item"
+                          onClick={() => { openPlayer(episode); }}
+                        >
+                          <div className="episode-art">
+                            {episode.poster ? (
+                              <img src={episode.poster} alt={episode.episodeTitle || episode.name} />
+                            ) : (
+                              <div className="episode-art-fallback">{(episodeLabel || episode.name).slice(0, 2).toUpperCase()}</div>
+                            )}
+                          </div>
+                          <div className="episode-copy">
+                            <strong>{episodeLabel}</strong>
+                            {episode.episodeTitle && <span>{episode.episodeTitle}</span>}
+                            <small>{episode.category}</small>
+                          </div>
+                          <div className="episode-meta">
+                            {watched && <span className="episode-badge watched">Assistido</span>}
+                            {playbackProgress[episode.id]?.position > 30 && (
+                              <span>Continuar em {formatDuration(playbackProgress[episode.id].position)}</span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            )}
+
+            {isLive && (
+              <section className="media-details-epg">
+                <h3>Grade de programacao</h3>
+                {item.epg && item.epg.length > 0 ? (
+                  <div className="epg-list">
+                    {item.epg.map((program) => (
+                      <div key={program.start} className="epg-item">
+                        <span className="epg-time">{program.start} - {program.end}</span>
+                        <span className="epg-title">{program.title}</span>
+                        {program.description && <span className="epg-desc">{program.description}</span>}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state">
+                    <strong>Grade indisponivel</strong>
+                    <span>Este provedor nao enviou a grade de programacao para este canal.</span>
+                  </div>
+                )}
+              </section>
+            )}
+
+            {(detailsRecommendations.length > 0 || detailsRecLoading) && (
+              <section className="media-details-recommendations">
+                <h3>Sugeridos</h3>
+                {detailsRecLoading ? (
+                  <div className="rec-skeleton">
+                    {[...Array(6)].map((_, i) => (
+                      <div key={i} className="rec-skeleton-card">
+                        <div className="rec-skeleton-img" />
+                        <div className="rec-skeleton-text" />
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rec-carousel-wrapper">
+                    <button
+                      type="button"
+                      className="rec-carousel-btn"
+                      onClick={() => carouselRef.current?.scrollBy({ left: -300, behavior: 'smooth' })}
+                      aria-label="Sugeridos anteriores"
+                      disabled={scrollLeft === 0}
+                    >
+                      ‹
+                    </button>
+                    <div className="rec-carousel" ref={carouselRef} onScroll={handleCarouselScroll}>
+                      {detailsRecommendations.map((rec) => (
+                        <ItemCard
+                          key={rec.id}
+                          item={rec}
+                          favorite={false}
+                          watchLater={false}
+                          recommended={false}
+                          watched={false}
+                          onFavorite={() => {}}
+                          onWatchLater={() => {}}
+                          onRecommend={() => {}}
+                          onPlay={() => handleSuggestionClick(rec)}
+                        />
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      className="rec-carousel-btn"
+                      onClick={() => carouselRef.current?.scrollBy({ left: 300, behavior: 'smooth' })}
+                      aria-label="Proximos sugeridos"
+                      disabled={!canScrollRight}
+                    >
+                      ›
+                    </button>
+                  </div>
+                )}
+              </section>
+            )}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   if (authLoading) {
     return (
       <div className="settings-page">
@@ -5452,6 +6712,14 @@ export default function App() {
           </div>
         </div>
       </div>
+    );
+  }
+
+  if (suspendedInfo) {
+    return (
+      <>
+        {renderSuspendedScreen()}
+      </>
     );
   }
 
@@ -5483,14 +6751,17 @@ export default function App() {
 
   if (bootLoading) {
     return (
-      <div className="settings-page">
-        <div className="settings-card">
-          <div className="empty-state">
-            <strong>Preparando catalogo local...</strong>
-            <span>Se for o primeiro acesso, a lista sera baixada uma unica vez e gravada em SQLite.</span>
+      <>
+        <div className="settings-page">
+          <div className="settings-card">
+            <div className="empty-state">
+              <strong>Preparando catalogo local...</strong>
+              <span>Se for o primeiro acesso, a lista sera baixada uma unica vez e gravada em SQLite.</span>
+            </div>
           </div>
         </div>
-      </div>
+        {renderSourceModal()}
+      </>
     );
   }
 
@@ -5501,6 +6772,7 @@ export default function App() {
       {activeSection === 'settings' && renderSettings()}
       {activeSection === 'recent' && renderRecent()}
       {activeSection === 'recommendations' && renderRecommendations()}
+      {activeSection === 'details' && renderMediaDetails()}
       {isListView && renderCatalogView()}
 
       {selectedItem && (
@@ -5517,12 +6789,26 @@ export default function App() {
           onPlayEpisode={openPlayer}
           onCastOpen={openCastModal}
           profileAgeLimit={activeProfile?.maxAgeRating ?? null}
+          catalogId={activeProfile?.catalogId}
           playerPreferences={playerPreferences}
           onUpdatePlayerPreferences={updatePlayerPreferences}
           onClose={() => setSelectedItem(null)}
-          onBackToEpisodes={(seriesKey) => {
+                    onBackToEpisodes={(seriesKey) => {
+            const playing = selectedItem;
             setSelectedItem(null);
-            setSelectedSeriesKey(seriesKey);
+            setDetailsItem({
+              id: `series:${seriesKey}`,
+              itemType: 'series_group',
+              contentType: 'series',
+              seriesKey,
+              name: playing?.seriesTitle || playing?.name || 'Serie',
+              poster: playing?.poster || '',
+              category: playing?.category && playing.category !== 'Sem categoria' ? playing.category : '',
+              year: playing?.year || null,
+              genre: playing?.genre || '',
+            });
+            setPreviousSection(activeSection === 'details' ? previousSection : activeSection);
+            setActiveSection('details');
           }}
         />
       )}
@@ -5537,18 +6823,6 @@ export default function App() {
             setCastModalError('');
             setCastModalLoading(false);
           }}
-        />
-      )}
-
-      {selectedSeriesKey && (
-        <SeriesDetailsModal
-          seriesKey={selectedSeriesKey}
-          onClose={() => setSelectedSeriesKey('')}
-          onPlay={handleEpisodePlay}
-          playbackProgress={playbackProgress}
-          watchedMap={watchedMap}
-          profileAgeLimit={activeProfile?.maxAgeRating ?? null}
-          onCastOpen={openCastModal}
         />
       )}
 
@@ -5587,7 +6861,20 @@ export default function App() {
         />
       )}
 
-      {catalogManagerOpen && <CatalogManagerModal onClose={() => setCatalogManagerOpen(false)} />}
+      {catalogManagerOpen && (
+        <CatalogManagerModal
+          onClose={() => setCatalogManagerOpen(false)}
+          activeProfileId={activeProfileId}
+          profiles={profiles}
+          userCatalogLimit={authUser?.catalogLimit}
+        />
+      )}
+      {userManagerOpen && (
+        <UserManagerModal
+          onClose={() => setUserManagerOpen(false)}
+        />
+      )}
+      {renderSourceModal()}
 
       {renderProfileFormModal()}
       {renderUserEditModal()}

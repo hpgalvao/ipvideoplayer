@@ -45,12 +45,26 @@ if not exist "frontend\dist\index.html" (
   if errorlevel 1 goto :erro
 )
 
-rem Se o servidor ja estiver rodando, apenas abre o navegador.
+rem Se o servidor ja estiver rodando, mostra o processo e pergunta o que fazer.
 netstat -ano | findstr "LISTENING" | findstr ":8787" >nul 2>nul
 if not errorlevel 1 (
   echo [INFO] O servidor ja esta rodando na porta 8787.
-  start "" "http://localhost:8787"
-  goto :fim
+  echo.
+  echo Processos na porta 8787:
+  for /f "tokens=5" %%a in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":8787"') do (
+    tasklist /fi "PID eq %%a" /fo table
+  )
+  echo.
+  set /p "CHOICE=Deseja matar o processo e reiniciar? (S/N): "
+  if /i "!CHOICE!"=="S" (
+    for /f "tokens=5" %%a in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":8787"') do (
+      taskkill /f /pid %%a >nul 2>nul
+      echo [INFO] Processo %%a finalizado.
+    )
+  ) else (
+    start "" "http://localhost:8787"
+    goto :fim
+  )
 )
 
 rem Descobre o IPv4 da rede local (interface com gateway) para acesso de celular/outro PC.

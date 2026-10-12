@@ -43,6 +43,8 @@ import {
   safeError,
   safePublicError,
   scrubMessage,
+  hasConfiguredCatalogSource,
+  syncCatalogFromM3uUrl,
   syncCatalogToDatabase,
 } from './iptv-service.js';
 import {
@@ -66,6 +68,7 @@ import {
 const app = express();
 const port = process.env.PORT || 8787;
 const STREAM_PROXY_TIMEOUT_MS = 20000;
+const MAX_CATALOGS_PER_USER = Math.max(0, Number(process.env.MAX_CATALOGS_PER_USER) || 5);
 const JWT_SECRET = process.env.JWT_SECRET || (crypto.randomBytes(32).toString('hex'));
 const JWT_TTL = process.env.JWT_TTL || '7d';
 const AUTH_COOKIE = 'iptv_session';
@@ -231,6 +234,8 @@ function publicUserRow(row) {
     plano: String(row.plano || ''),
     dt_assinatura: row.dt_assinatura ? String(row.dt_assinatura) : null,
     dt_validade: row.dt_validade ? String(row.dt_validade) : null,
+    profileLimit: row.profile_limit == null ? null : Number(row.profile_limit),
+    catalogLimit: row.catalog_limit == null ? null : Number(row.catalog_limit),
     ativo: Number(row.ativo) === 1,
     created_at: row.created_at ? String(row.created_at) : null,
     updated_at: row.updated_at ? String(row.updated_at) : null,
@@ -246,6 +251,8 @@ function publicProfileRow(row) {
     avatar: String(row.avatar || ''),
     color: String(row.color || ''),
     maxAgeRating: Number(row.max_age_rating || 999),
+    catalogId: row.catalog_id ? String(row.catalog_id) : '',
+    catalogName: row.catalog_name ? String(row.catalog_name) : '',
     pin: String(row.pin || ''),
     sortOrder: Number(row.sort_order || 0),
     created_at: row.created_at ? String(row.created_at) : null,
@@ -264,13 +271,12 @@ function maskCatalogUrl(url, password) {
 
 function publicCatalogRow(row) {
   if (!row) return null;
-  const password = String(row.password || '');
   return {
     id: String(row.id),
+    userId: row.user_id ? String(row.user_id) : '',
+    ownerName: row.owner_name ? String(row.owner_name) : '',
     name: String(row.name || ''),
-    url: maskCatalogUrl(row.url, password),
-    baseUrl: String(row.base_url || ''),
-    username: String(row.username || ''),
+    url: maskCatalogUrl(row.url, String(row.password || '')),
     output: String(row.output || 'm3u8'),
     status: String(row.status || 'pending'),
     error: row.error_message ? String(row.error_message) : '',
@@ -279,6 +285,7 @@ function publicCatalogRow(row) {
     movieCount: Number(row.movie_count || 0),
     seriesCount: Number(row.series_count || 0),
     isActive: Number(row.is_active) === 1,
+    isPublic: Number(row.is_public) === 1,
     createdAt: row.created_at ? String(row.created_at) : null,
     updatedAt: row.updated_at ? String(row.updated_at) : null,
     lastSyncAt: row.last_sync_at ? String(row.last_sync_at) : null,
@@ -443,7 +450,15 @@ app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
       return invalidCredentials();
     }
     if (!isUserStillValid(row)) {
-      return invalidCredentials();
+      // Credenciais corretas, mas conta inativa/expirada: nao cria sessao.
+      return res.json({
+        ok: true,
+        suspended: true,
+        reason: Number(row.ativo) !== 1
+          ? 'Sua conta esta suspensa. Entre em contato com o administrador.'
+          : 'Sua assinatura expirou. Renove para continuar.',
+        user: publicUserRow(row),
+      });
     }
     signAuthCookie(req, res, row);
     const profiles = await queryAll('SELECT * FROM profiles WHERE user_id = ? ORDER BY sort_order ASC, created_at ASC', [row.id]);
@@ -551,6 +566,12 @@ app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
     const password = String(body.password || '');
     if (!password) return res.status(400).json({ ok: false, message: 'Senha obrigatoria.' });
     const plano = String(body.plano || '').trim() || null;
+    const profileLimit = body.profile_limit == null || body.profile_limit === ''
+      ? null
+      : Math.max(0, Number(body.profile_limit) || 0);
+    const catalogLimit = body.catalog_limit == null || body.catalog_limit === ''
+      ? null
+      : Math.max(0, Number(body.catalog_limit) || 0);
     const existing = await queryOne('SELECT COUNT(*) AS total FROM users WHERE username = ?', [username]);
     if (existing && Number(existing.total) > 0) {
       return res.status(400).json({ ok: false, message: 'Usuario ja existe.' });
@@ -560,8 +581,8 @@ app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
     const userId = uid('usr');
     await transaction(async (tx) => {
       tx.run(
-        `INSERT INTO users (id, tipo, nome, foto, email, contato, username, password_hash, password_salt, plano, dt_assinatura, dt_validade, ativo, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (id, tipo, nome, foto, email, contato, username, password_hash, password_salt, plano, dt_assinatura, dt_validade, profile_limit, catalog_limit, ativo, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           userId,
           tipo,
@@ -575,6 +596,8 @@ app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
           plano,
           validity.signature,
           validity.validity,
+          profileLimit,
+          catalogLimit,
           tipo === 'admin' ? 1 : Number(validity.active),
           isoNow(),
           isoNow(),
@@ -643,6 +666,12 @@ app.put('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
       if (body.dt_assinatura != null) dt_assinatura = String(body.dt_assinatura);
       if (body.dt_validade != null) dt_validade = String(body.dt_validade);
     }
+    const profileLimit = body.profile_limit !== undefined
+      ? (body.profile_limit === '' || body.profile_limit == null ? null : Math.max(0, Number(body.profile_limit) || 0))
+      : (current.profile_limit == null ? null : Number(current.profile_limit));
+    const catalogLimit = body.catalog_limit !== undefined
+      ? (body.catalog_limit === '' || body.catalog_limit == null ? null : Math.max(0, Number(body.catalog_limit) || 0))
+      : (current.catalog_limit == null ? null : Number(current.catalog_limit));
     if (username !== String(current.username)) {
       const conflict = await queryOne('SELECT COUNT(*) AS total FROM users WHERE username = ? AND id <> ?', [username, id]);
       if (conflict && Number(conflict.total) > 0) {
@@ -651,7 +680,7 @@ app.put('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
     }
     await transaction(async (tx) => {
       tx.run(
-        `UPDATE users SET tipo = ?, nome = ?, foto = ?, email = ?, contato = ?, username = ?, plano = ?, dt_assinatura = ?, dt_validade = ?, ativo = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE users SET tipo = ?, nome = ?, foto = ?, email = ?, contato = ?, username = ?, plano = ?, dt_assinatura = ?, dt_validade = ?, profile_limit = ?, catalog_limit = ?, ativo = ?, updated_at = ? WHERE id = ?`,
         [
           tipo,
           nome,
@@ -662,6 +691,8 @@ app.put('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
           plano,
           dt_assinatura || null,
           dt_validade || null,
+          profileLimit,
+          catalogLimit,
           ativo,
           isoNow(),
           id,
@@ -721,7 +752,7 @@ app.post('/api/users/:id/toggle-active', requireAuth, requireAdmin, async (req, 
 app.get('/api/profiles', requireAuth, async (req, res) => {
   try {
     const rows = await queryAll(
-      'SELECT * FROM profiles WHERE user_id = ? ORDER BY sort_order ASC, created_at ASC',
+      'SELECT p.*, c.name AS catalog_name FROM profiles p LEFT JOIN catalogs c ON c.id = p.catalog_id WHERE p.user_id = ? ORDER BY p.sort_order ASC, p.created_at ASC',
       [req.user.id],
     );
     res.json({ ok: true, profiles: rows.map(publicProfileRow) });
@@ -966,17 +997,46 @@ app.post('/api/avatars/apply', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/catalog/status', requireAuth, async (_req, res) => {
+app.get('/api/catalog/status', requireAuth, async (req, res) => {
   try {
-    const status = await getCatalogStatus();
+    const catalogId = String(req.query.catalogId || '').trim();
+    const [status, hasSource] = await Promise.all([getCatalogStatus(catalogId), hasConfiguredCatalogSource()]);
     res.json({
       ok: true,
+      hasSource,
       ...status,
     });
   } catch (error) {
     res.status(500).json({
       ok: false,
       message: safePublicError('catalog_status', error, 'Nao foi possivel verificar status.'),
+    });
+  }
+});
+
+app.post('/api/catalog/source', requireAuth, requireAdmin, sensitiveActionRateLimiter, async (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    return res.status(400).json({ ok: false, message: 'Informe uma URL de lista M3U valida (http ou https).' });
+  }
+
+  // Anti-SSRF: nao permite baixar de enderecos internos/loopback.
+  try {
+    const parsed = new URL(url);
+    if (isPrivateHostname(parsed.hostname)) {
+      return res.status(403).json({ ok: false, message: 'Destino nao permitido.' });
+    }
+  } catch {
+    return res.status(400).json({ ok: false, message: 'URL invalida.' });
+  }
+
+  try {
+    const status = await syncCatalogFromM3uUrl(url, { force: true });
+    res.json({ ok: true, ...status });
+  } catch (error) {
+    res.status(502).json({
+      ok: false,
+      message: safePublicError('catalog_source', error, 'Nao foi possivel baixar a lista informada. Verifique a URL e tente novamente.'),
     });
   }
 });
@@ -1036,7 +1096,7 @@ app.post('/api/catalog/query', requireAuth, async (req, res) => {
 app.post('/api/catalog/exists-ids', requireAuth, async (req, res) => {
   try {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
-    const result = await resolveExistingIds(ids);
+    const result = await resolveExistingIds(ids, String(req.body?.catalogId || '').trim());
     res.json({
       ok: true,
       valid: result.valid,
@@ -1052,11 +1112,30 @@ app.post('/api/catalog/exists-ids', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/catalogs', requireAuth, requireAdmin, async (_req, res) => {
+function canManageCatalog(user, catalog) {
+  if (!user || !catalog) {
+    return false;
+  }
+  if (String(user.tipo || '').toLowerCase() === 'admin') {
+    return true;
+  }
+  return String(catalog.user_id || '') === String(user.id || '');
+}
+
+app.get('/api/catalogs', requireAuth, async (req, res) => {
   try {
-    const rows = await queryAll('SELECT * FROM catalogs ORDER BY created_at DESC');
+    const isAdmin = String(req.user?.tipo || '').toLowerCase() === 'admin';
+    const scopeAll = isAdmin && String(req.query.scope || '') === 'all';
+    const rows = scopeAll
+      ? await queryAll(
+          'SELECT c.*, u.nome AS owner_name FROM catalogs c LEFT JOIN users u ON u.id = c.user_id ORDER BY c.created_at DESC',
+        )
+      : await queryAll('SELECT * FROM catalogs WHERE user_id = ? ORDER BY created_at DESC', [req.user.id]);
+
     res.json({
       ok: true,
+      scope: scopeAll ? 'all' : 'own',
+      isAdmin,
       catalogs: rows.map(publicCatalogRow),
     });
   } catch (error) {
@@ -1067,7 +1146,36 @@ app.get('/api/catalogs', requireAuth, requireAdmin, async (_req, res) => {
   }
 });
 
-app.get('/api/catalogs/provider', requireAuth, requireAdmin, (_req, res) => {
+app.get('/api/catalogs/public', requireAuth, async (req, res) => {
+  try {
+    const rows = await queryAll(
+      'SELECT c.*, u.nome AS owner_name FROM catalogs c LEFT JOIN users u ON u.id = c.user_id WHERE c.is_public = 1 AND c.status = \'ok\' ORDER BY c.created_at DESC'
+    );
+
+    res.json({
+      ok: true,
+      catalogs: rows.map(publicCatalogRow),
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      message: safePublicError('catalog_public_list', error, 'Nao foi possivel carregar os catalogos publicos.'),
+    });
+  }
+});
+
+app.get('/api/catalogs/provider', requireAuth, (req, res) => {
+  const isAdmin = String(req.user?.tipo || '').toLowerCase() === 'admin';
+  if (!isAdmin) {
+    return res.json({
+      ok: true,
+      provider: {
+        baseUrl: '',
+        username: '',
+        hasPassword: false,
+      },
+    });
+  }
   res.json({
     ok: true,
     provider: {
@@ -1078,7 +1186,17 @@ app.get('/api/catalogs/provider', requireAuth, requireAdmin, (_req, res) => {
   });
 });
 
-app.post('/api/catalogs', requireAuth, requireAdmin, sensitiveActionRateLimiter, async (req, res) => {
+function canManageCatalogRow(user, catalog) {
+  if (!user || !catalog) {
+    return false;
+  }
+  if (String(user.tipo || '').toLowerCase() === 'admin') {
+    return true;
+  }
+  return String(catalog.user_id || '') === String(user.id || '');
+}
+
+app.post('/api/catalogs', requireAuth, sensitiveActionRateLimiter, async (req, res) => {
   const name = String(req.body?.name || '').trim();
 
   const source = normalizeCatalogSource({
@@ -1101,13 +1219,25 @@ app.post('/api/catalogs', requireAuth, requireAdmin, sensitiveActionRateLimiter,
   }
 
   try {
+    const limit = req.user?.catalogLimit == null
+      ? MAX_CATALOGS_PER_USER
+      : Math.max(0, Number(req.user.catalogLimit) || 0);
+    const countRow = await queryOne('SELECT COUNT(*) AS total FROM catalogs WHERE user_id = ?', [req.user.id]);
+    if (Number(countRow?.total || 0) >= limit) {
+      return res.status(400).json({
+        ok: false,
+        message: `Limite de ${limit} lista(s) atingido. Apague listas (inclusive as que deram erro) para adicionar outra.`,
+      });
+    }
+
     const id = uid('cat');
     const now = isoNow();
     await runPersistent(
-      `INSERT INTO catalogs (id, name, url, base_url, username, password, output, status, error_message, total_count, live_count, movie_count, series_count, is_active, created_at, updated_at, last_sync_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', '', 0, 0, 0, 0, 0, ?, ?, '')`,
+      `INSERT INTO catalogs (id, user_id, name, url, base_url, username, password, output, status, error_message, total_count, live_count, movie_count, series_count, is_active, created_at, updated_at, last_sync_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', 0, 0, 0, 0, 0, ?, ?, '')`,
       [
         id,
+        req.user.id,
         name || deriveCatalogName(source.url, source.username),
         source.url,
         source.baseUrl || '',
@@ -1129,12 +1259,15 @@ app.post('/api/catalogs', requireAuth, requireAdmin, sensitiveActionRateLimiter,
   }
 });
 
-app.post('/api/catalogs/:id/retry', requireAuth, requireAdmin, sensitiveActionRateLimiter, async (req, res) => {
+app.post('/api/catalogs/:id/retry', requireAuth, sensitiveActionRateLimiter, async (req, res) => {
   try {
     const id = String(req.params.id || '');
-    const existing = await queryOne('SELECT id FROM catalogs WHERE id = ?', [id]);
+    const existing = await queryOne('SELECT * FROM catalogs WHERE id = ?', [id]);
     if (!existing) {
       return res.status(404).json({ ok: false, message: 'Lista nao encontrada.' });
+    }
+    if (!canManageCatalog(req.user, existing)) {
+      return res.status(403).json({ ok: false, message: 'Sem permissao para esta lista.' });
     }
 
     const row = await runCatalogDownload(id);
@@ -1147,10 +1280,50 @@ app.post('/api/catalogs/:id/retry', requireAuth, requireAdmin, sensitiveActionRa
   }
 });
 
-app.delete('/api/catalogs/:id', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/catalogs/:id/toggle-public', requireAuth, async (req, res) => {
   try {
     const id = String(req.params.id || '');
-    await runPersistent('DELETE FROM catalogs WHERE id = ?', [id]);
+    const existing = await queryOne('SELECT * FROM catalogs WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ ok: false, message: 'Lista nao encontrada.' });
+    }
+    const isAdmin = String(req.user?.tipo || '').toLowerCase() === 'admin';
+    const isOwner = String(existing.user_id || '') === String(req.user.id || '');
+    if (!isAdmin && !isOwner) {
+      return res.status(403).json({ ok: false, message: 'Sem permissao para alterar esta lista.' });
+    }
+    if (String(existing.status || '') !== 'ok') {
+      return res.status(400).json({ ok: false, message: 'So catalogos com status OK podem ser tornados publicos/privados.' });
+    }
+
+    const newPublic = Number(existing.is_public) === 1 ? 0 : 1;
+    await runPersistent('UPDATE catalogs SET is_public = ?, updated_at = ? WHERE id = ?', [newPublic, isoNow(), id]);
+    const updated = await queryOne('SELECT * FROM catalogs WHERE id = ?', [id]);
+
+    res.json({ ok: true, catalog: publicCatalogRow(updated) });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      message: safePublicError('catalog_toggle_public', error, 'Nao foi possivel alterar visibilidade da lista.'),
+    });
+  }
+});
+
+app.delete('/api/catalogs/:id', requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || '');
+    const existing = await queryOne('SELECT * FROM catalogs WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ ok: false, message: 'Lista nao encontrada.' });
+    }
+    if (!canManageCatalog(req.user, existing)) {
+      return res.status(403).json({ ok: false, message: 'Sem permissao para remover esta lista.' });
+    }
+    await transaction(async (tx) => {
+      tx.run('DELETE FROM items WHERE catalog_id = ?', [id]);
+      tx.run('UPDATE profiles SET catalog_id = NULL, updated_at = ? WHERE catalog_id = ?', [isoNow(), id]);
+      tx.run('DELETE FROM catalogs WHERE id = ?', [id]);
+    });
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({
@@ -1160,10 +1333,58 @@ app.delete('/api/catalogs/:id', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+app.post('/api/catalogs/:id/use', requireAuth, sensitiveActionRateLimiter, async (req, res) => {
+  try {
+    const id = String(req.params.id || '');
+    const catalog = await queryOne('SELECT * FROM catalogs WHERE id = ?', [id]);
+    if (!catalog) {
+      return res.status(404).json({ ok: false, message: 'Lista nao encontrada.' });
+    }
+    const isAdmin = String(req.user?.tipo || '').toLowerCase() === 'admin';
+    const isOwner = String(catalog.user_id || '') === String(req.user.id || '');
+    const isPublic = Number(catalog.is_public) === 1;
+    if (!isAdmin && !isOwner && !isPublic) {
+      return res.status(403).json({ ok: false, message: 'Sem permissao para esta lista.' });
+    }
+    if (String(catalog.status || '') === 'error') {
+      return res.status(400).json({ ok: false, message: 'Esta lista falhou ao baixar. Use "Tentar novamente" antes de usa-la.' });
+    }
+
+    const existing = await queryOne('SELECT COUNT(*) AS total FROM items WHERE catalog_id = ?', [id]);
+    const status = Number(existing?.total || 0) > 0
+      ? await getCatalogStatus(id)
+      : await syncCatalogFromM3uUrl(catalog.url, { force: true, catalogId: id });
+
+    const profileId = String(req.body?.profileId || '').trim();
+    let assignedProfile = null;
+    if (profileId) {
+      const profile = await queryOne('SELECT * FROM profiles WHERE id = ? AND user_id = ?', [profileId, req.user.id]);
+      if (!profile) {
+        return res.status(404).json({ ok: false, message: 'Perfil nao encontrado.' });
+      }
+      await runPersistent('UPDATE profiles SET catalog_id = ?, updated_at = ? WHERE id = ?', [id, isoNow(), profileId]);
+      assignedProfile = await queryOne('SELECT * FROM profiles WHERE id = ?', [profileId]);
+    }
+
+    res.json({
+      ok: true,
+      catalog: publicCatalogRow(catalog),
+      status,
+      profile: assignedProfile ? publicProfileRow(assignedProfile) : null,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      message: safePublicError('catalog_use', error, 'Nao foi possivel carregar esta lista.'),
+    });
+  }
+});
+
 app.get('/api/series/:seriesKey', requireAuth, async (req, res) => {
   try {
     const details = await getSeriesGroupDetails(req.params.seriesKey || '', {
       maxAgeRating: req.query.maxAgeRating,
+      catalogId: req.query.catalogId,
     });
     if (!details) {
       return res.status(404).json({

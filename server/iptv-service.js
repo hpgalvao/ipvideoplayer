@@ -561,9 +561,9 @@ function buildCatalogUrlCandidates(source) {
   return candidates;
 }
 
-const CATALOG_USER_AGENTS = [DEFAULT_FETCH_USER_AGENT, BROWSER_USER_AGENT];
-const CATALOG_ATTEMPT_TIMEOUT_MS = Number(process.env.IPTV_CATALOG_TIMEOUT_MS) || 90000;
-const CATALOG_TOTAL_TIMEOUT_MS = Number(process.env.IPTV_CATALOG_TOTAL_TIMEOUT_MS) || 360000;
+const CATALOG_USER_AGENTS = [BROWSER_USER_AGENT, DEFAULT_FETCH_USER_AGENT];
+const CATALOG_ATTEMPT_TIMEOUT_MS = Number(process.env.IPTV_CATALOG_TIMEOUT_MS) || 180000;
+const CATALOG_TOTAL_TIMEOUT_MS = Number(process.env.IPTV_CATALOG_TOTAL_TIMEOUT_MS) || 600000;
 
 export async function downloadM3UCatalog(source) {
   const normalized =
@@ -796,6 +796,11 @@ function buildWhereClause(filters, options = {}) {
   const { exclude = new Set(), titleField = 'normalized_name' } = options;
   const clauses = [];
   const params = [];
+
+  if (!exclude.has('catalog') && filters.catalogId) {
+    clauses.push('catalog_id = ?');
+    params.push(String(filters.catalogId));
+  }
 
   if (!exclude.has('section')) {
     if (filters.section === 'favorites' || filters.section === 'watch-later') {
@@ -1106,16 +1111,33 @@ async function fetchRemoteItems(settings) {
   return Array.from(deduped.values()).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
 }
 
-export async function getCatalogStatus() {
+export async function getCatalogStatus(catalogId = '') {
+  const scopedCatalogId = catalogId ? String(catalogId) : '';
   const rows = await queryAll(
-    `
-      SELECT content_type, COUNT(*) AS total
-      FROM items
-      GROUP BY content_type
-    `,
+    catalogId
+      ? `
+        SELECT content_type, COUNT(*) AS total
+        FROM items
+        WHERE catalog_id = ?
+        GROUP BY content_type
+      `
+      : `
+        SELECT content_type, COUNT(*) AS total
+        FROM items
+        GROUP BY content_type
+      `,
+    scopedCatalogId ? [scopedCatalogId] : [],
   );
-  const metaRows = await queryAll("SELECT key, value FROM meta WHERE key IN ('last_sync_at')");
-  const meta = Object.fromEntries(metaRows.map((row) => [row.key, row.value]));
+
+  let updatedAt = '';
+  if (scopedCatalogId) {
+    const catalogRow = await queryOne('SELECT last_sync_at FROM catalogs WHERE id = ?', [scopedCatalogId]);
+    updatedAt = catalogRow?.last_sync_at ? String(catalogRow.last_sync_at) : '';
+  } else {
+    const metaRows = await queryAll("SELECT key, value FROM meta WHERE key IN ('last_sync_at')");
+    const meta = Object.fromEntries(metaRows.map((row) => [row.key, row.value]));
+    updatedAt = meta.last_sync_at || '';
+  }
 
   const counts = {
     live: 0,
@@ -1130,7 +1152,7 @@ export async function getCatalogStatus() {
   return {
     hasData: counts.live + counts.movie + counts.series > 0,
     counts,
-    updatedAt: meta.last_sync_at || '',
+    updatedAt,
   };
 }
 
@@ -1235,8 +1257,8 @@ async function buildProviderCandidates(rawSettings) {
   return list;
 }
 
-export async function syncCatalogToDatabase(settings, { force = false } = {}) {
-  const currentStatus = await getCatalogStatus();
+export async function syncCatalogToDatabase(settings, { force = false, catalogId = '' } = {}) {
+  const currentStatus = await getCatalogStatus(catalogId);
   if (currentStatus.hasData && !force) {
     return currentStatus;
   }
@@ -1268,10 +1290,25 @@ export async function syncCatalogToDatabase(settings, { force = false } = {}) {
     throw lastError || new Error('Nao foi possivel baixar o catalogo de nenhuma fonte configurada.');
   }
 
+  return persistCatalogItems(items, {
+    baseUrl: usedSettings.baseUrl,
+    username: usedSettings.username,
+    source: 'xtream',
+    catalogId,
+  });
+}
+
+async function persistCatalogItems(items, meta = {}) {
   const updatedAt = new Date().toISOString();
+  const catalogId = meta.catalogId ? String(meta.catalogId) : '';
 
   await transaction(async (tx) => {
-    tx.run('DELETE FROM items');
+    if (catalogId) {
+      // Substitui apenas os itens deste catalogo e remove itens legados (sem catalogo_id).
+      tx.run('DELETE FROM items WHERE catalog_id = ? OR catalog_id IS NULL', [catalogId]);
+    } else {
+      tx.run('DELETE FROM items');
+    }
     tx.run('DELETE FROM meta');
 
     const insertSql = `
@@ -1280,9 +1317,9 @@ export async function syncCatalogToDatabase(settings, { force = false } = {}) {
         extension, container_extension, poster, category, category_id, year, genre, genres_json,
         genres_index, series_title, normalized_series_title, series_key, season_number,
         episode_number, episode_title, cast_text, normalized_cast, director, normalized_director,
-        rating, age_rating, added, plot, normalized_plot, tmdb_id
+        rating, age_rating, added, plot, normalized_plot, tmdb_id, catalog_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     items.forEach((item) => {
@@ -1320,15 +1357,57 @@ export async function syncCatalogToDatabase(settings, { force = false } = {}) {
         item.plot,
         item.normalizedPlot,
         item.tmdbId,
+        catalogId || null,
       ]);
     });
 
     await setMetaValue(tx, 'last_sync_at', updatedAt);
-    await setMetaValue(tx, 'last_base_url', usedSettings.baseUrl);
-    await setMetaValue(tx, 'last_username', usedSettings.username);
+    await setMetaValue(tx, 'last_base_url', meta.baseUrl || '');
+    await setMetaValue(tx, 'last_username', meta.username || '');
+    await setMetaValue(tx, 'last_source', meta.source || '');
+    await setMetaValue(tx, 'last_catalog_id', catalogId);
   });
 
-  return getCatalogStatus();
+  return getCatalogStatus(catalogId);
+}
+
+export async function hasConfiguredCatalogSource() {
+  try {
+    const candidates = await buildProviderCandidates({});
+    return candidates.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Monta o catalogo do sistema a partir de uma URL M3U direta (sem usuario/senha).
+export async function syncCatalogFromM3uUrl(rawUrl, { force = false, catalogId = '' } = {}) {
+  const currentStatus = await getCatalogStatus(catalogId);
+  if (currentStatus.hasData && !force) {
+    return currentStatus;
+  }
+
+  const url = String(rawUrl || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error('Informe uma URL de lista M3U valida (http ou https).');
+  }
+
+  const content = await fetchText(url, 'catalog_source');
+  const merged = mergeApiMetadata(parseM3U(content, ''), normalizeApiData({}));
+  if (!merged.length) {
+    throw new Error('A lista respondeu sem canais. Confira se a URL aponta para um arquivo M3U.');
+  }
+
+  const items = merged.map((item) => ({ ...item, contentType: classifyCatalogItem(item) }));
+
+  let origin = '';
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    origin = '';
+  }
+
+  return persistCatalogItems(items, { baseUrl: origin, username: '', source: 'm3u', catalogId });
 }
 
 async function getDistinctCategories(filters, options = {}) {
@@ -1736,6 +1815,10 @@ export async function getSeriesGroupDetails(seriesKey, options = {}) {
   const ageSql = hasAgeLimit ? ' AND (age_rating IS NULL OR age_rating <= ?)' : '';
   const ageParams = hasAgeLimit ? [parsedMaxAgeRating] : [];
 
+  const hasCatalog = Boolean(options.catalogId);
+  const catalogSql = hasCatalog ? ' AND catalog_id = ?' : '';
+  const catalogParams = hasCatalog ? [String(options.catalogId)] : [];
+
   const summaryRow = await queryOne(
     `
       SELECT
@@ -1768,11 +1851,11 @@ export async function getSeriesGroupDetails(seriesKey, options = {}) {
         MAX(plot) AS plot,
         MAX(tmdb_id) AS tmdb_id
       FROM items
-      WHERE content_type = 'series' AND series_key = ?${ageSql}
+      WHERE content_type = 'series' AND series_key = ?${catalogSql}${ageSql}
       GROUP BY series_key
       LIMIT 1
     `,
-    [cleanSeriesKey, ...ageParams],
+    [cleanSeriesKey, ...catalogParams, ...ageParams],
   );
 
   if (!summaryRow) {
@@ -1786,13 +1869,13 @@ export async function getSeriesGroupDetails(seriesKey, options = {}) {
         poster, category, category_id, year, genre, series_title, series_key, season_number, episode_number,
         episode_title, 0 AS episode_count, 0 AS season_count, cast_text, director, rating, age_rating, added, plot, tmdb_id
       FROM items
-      WHERE content_type = 'series' AND series_key = ?${ageSql}
+      WHERE content_type = 'series' AND series_key = ?${catalogSql}${ageSql}
       ORDER BY
         COALESCE(season_number, 0),
         COALESCE(episode_number, 0),
         sort_name COLLATE NOCASE
     `,
-    [cleanSeriesKey, ...ageParams],
+    [cleanSeriesKey, ...catalogParams, ...ageParams],
   );
 
   const seasonsMap = new Map();
@@ -1820,11 +1903,15 @@ export function safeError(error) {
   return 'Falha ao processar catalogo. Tente novamente em instantes.';
 }
 
-export async function resolveExistingIds(rawIds) {
+export async function resolveExistingIds(rawIds, catalogId = '') {
   const ids = Array.isArray(rawIds) ? rawIds.filter(Boolean) : [];
   if (!ids.length) {
     return { valid: [], invalid: [] };
   }
+
+  const hasCatalog = Boolean(catalogId);
+  const catalogSql = hasCatalog ? ' AND catalog_id = ?' : '';
+  const catalogParams = hasCatalog ? [String(catalogId)] : [];
 
   const regularIds = [];
   const seriesKeys = [];
@@ -1840,8 +1927,8 @@ export async function resolveExistingIds(rawIds) {
   if (regularIds.length) {
     const placeholders = regularIds.map(() => '?').join(', ');
     const rows = await queryAll(
-      `SELECT id FROM items WHERE id IN (${placeholders})`,
-      regularIds,
+      `SELECT id FROM items WHERE id IN (${placeholders})${catalogSql}`,
+      [...regularIds, ...catalogParams],
     );
     for (const row of rows) {
       validRegular.add(String(row.id));
@@ -1852,8 +1939,8 @@ export async function resolveExistingIds(rawIds) {
   if (seriesKeys.length) {
     const placeholders = seriesKeys.map(() => '?').join(', ');
     const rows = await queryAll(
-      `SELECT DISTINCT series_key FROM items WHERE series_key IS NOT NULL AND series_key <> '' AND series_key IN (${placeholders})`,
-      seriesKeys,
+      `SELECT DISTINCT series_key FROM items WHERE series_key IS NOT NULL AND series_key <> '' AND series_key IN (${placeholders})${catalogSql}`,
+      [...seriesKeys, ...catalogParams],
     );
     for (const row of rows) {
       validSeries.add(`series-group:${String(row.series_key)}`);
