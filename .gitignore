@@ -29,6 +29,10 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Listas de playlist temporarias
+*.m3u
+*.m3u8
+
 # Configuracoes locais de ferramentas/editor
 .kilo/
 .vscode/
